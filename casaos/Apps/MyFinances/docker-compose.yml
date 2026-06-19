@@ -1,0 +1,69 @@
+name: my-finances
+services:
+  my-finances:
+    image: ghcr.io/mavsar/my-finances:v1.0
+    pull_policy: always
+    container_name: my-finances
+    environment:
+      NODE_ENV: production
+      PORT: "3210"
+      DATABASE_PATH: /app/data/my-finances.db
+      AUTH_USERNAME: ${AUTH_USERNAME:-admin}
+      AUTH_PASSWORD: ${AUTH_PASSWORD:-changeme}
+      JWT_SECRET: ${JWT_SECRET:-change-this-secret}
+    ports:
+      - target: 3210
+        published: "3210"
+        protocol: tcp
+    volumes:
+      - type: bind
+        source: /DATA/AppData/$AppID/data
+        target: /app/data
+    restart: unless-stopped
+    x-casaos:
+      envs:
+        - container: AUTH_USERNAME
+          description:
+            en_US: Login username.
+        - container: AUTH_PASSWORD
+          description:
+            en_US: Login password. Change before first start.
+        - container: JWT_SECRET
+          description:
+            en_US: Secret key used to sign JWT tokens. Use a long random string.
+      ports:
+        - container: "3210"
+          description:
+            en_US: My Finances web UI.
+      volumes:
+        - container: /app/data
+          description:
+            en_US: Persistent storage for the SQLite database.
+
+x-casaos:
+  architectures:
+    - amd64
+    - arm64
+    - arm
+  main: my-finances
+  author: Primoz
+  category: Finance
+  description:
+    en_US: Self-hosted personal finance app. Upload bank statements, auto-categorise transactions, and visualise spending trends.
+  developer: Primoz
+  icon: https://raw.githubusercontent.com/mavsar/my-finances/main/apps/web/public/app-icon.png
+  screenshot_link: []
+  tagline:
+    en_US: Self-hosted personal finance tracker for CasaOS.
+  thumbnail: ""
+  tips:
+    before_install:
+      en_US: |
+        Set your credentials before first start:
+        - AUTH_USERNAME  (default: admin)
+        - AUTH_PASSWORD  (default: changeme)
+        - JWT_SECRET     (use a long random string)
+  title:
+    en_US: My Finances
+  index: /
+  port_map: "3210"
