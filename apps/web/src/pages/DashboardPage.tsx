@@ -469,7 +469,13 @@ function TransactionList({ from, to, categoryId, onCategoryChange }: { from?: st
             size="sm"
             value={bulkCatId}
             onChange={(val) => setBulkCatId(val as number | null)}
-            options={categories.map((c) => ({ value: c.id, label: c.name, color: c.color }))}
+            options={(() => {
+              const selectedTxns = transactions.filter((t) => selectedIds.has(t.id));
+              const types = new Set(selectedTxns.map((t) => t.type));
+              const sharedType = types.size === 1 ? [...types][0] : null;
+              return (sharedType ? categories.filter((c) => c.type === sharedType) : categories)
+                .map((c) => ({ value: c.id, label: c.name, color: c.color }));
+            })()}
             nullable
             nullLabel="— izberi kategorijo —"
             className="flex-1 max-w-xs"
@@ -544,7 +550,7 @@ function TransactionList({ from, to, categoryId, onCategoryChange }: { from?: st
                           size="sm"
                           value={t.category_id ?? null}
                           onChange={(val) => { if (val !== null) void handleCategoryChange(t.id, val as number); }}
-                          options={categories.map((c) => ({ value: c.id, label: c.name, color: c.color }))}
+                          options={categories.filter((c) => c.type === t.type).map((c) => ({ value: c.id, label: c.name, color: c.color }))}
                           nullable
                           nullLabel="— nedoločeno —"
                           className="max-w-[200px]"

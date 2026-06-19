@@ -249,15 +249,15 @@ const migrations: Migration[] = [
     `
   },
   {
-    // Sync transaction type with its assigned category type.
-    // Transactions imported from PDFs get their type from the bank (debit/credit),
-    // but manual category assignment may place an expense transaction in an income
-    // category or vice-versa. This aligns all transactions so that type always
-    // reflects the category type.
-    name: "017_sync_transaction_types",
+    // Clear category assignments where the category type doesn't match the
+    // transaction type (e.g. an income category on an expense transaction).
+    // Transaction type is always determined by the amount sign from the bank
+    // statement and must never be changed. Clearing the wrong category lets
+    // the transaction be re-categorized correctly.
+    name: "017_clear_mismatched_categories",
     sql: `
       UPDATE transactions
-      SET type = (SELECT type FROM categories WHERE categories.id = transactions.category_id)
+      SET category_id = NULL, is_manual = 0
       WHERE category_id IS NOT NULL
         AND type != (SELECT type FROM categories WHERE categories.id = transactions.category_id);
     `

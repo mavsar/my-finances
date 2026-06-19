@@ -29,8 +29,6 @@ export async function recategorizeAll(
     .prepare("SELECT pattern, conditions, category_id, is_locked FROM category_rules ORDER BY is_locked DESC, length(pattern) DESC")
     .all() as MatchableRule[];
 
-  const catTypeById = new Map(categories.map((c) => [c.id, c.type]));
-
   const where =
     scope === "uncategorized"
       ? "WHERE is_manual = 0 AND category_id IS NULL"
@@ -46,12 +44,12 @@ export async function recategorizeAll(
   const needsGemini: TxnRow[] = [];
   let rulesApplied = 0;
 
-  const updateCat = sqlite.prepare("UPDATE transactions SET category_id = ?, type = ? WHERE id = ?");
+  const updateCat = sqlite.prepare("UPDATE transactions SET category_id = ? WHERE id = ?");
 
   for (const txn of transactions) {
     const catId = matchRules(txn.description, rules);
     if (catId !== null) {
-      updateCat.run(catId, catTypeById.get(catId) ?? txn.type, txn.id);
+      updateCat.run(catId, txn.id);
       rulesApplied++;
     } else {
       needsGemini.push(txn);
@@ -87,7 +85,7 @@ export async function recategorizeAll(
         sqlite.transaction(() => {
           for (const r of results) {
             if (r.category_id) {
-              updateCat.run(r.category_id, catTypeById.get(r.category_id) ?? 'expense', r.id);
+              updateCat.run(r.category_id, r.id);
               geminiApplied++;
               const desc = descById.get(r.id);
               if (desc) insertRule.run(desc, r.category_id);

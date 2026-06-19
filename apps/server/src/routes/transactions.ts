@@ -76,8 +76,8 @@ transactionsRouter.patch("/:id/category", (req, res) => {
   if (!txn) { res.status(404).json({ error: "Transakcija ne obstaja" }); return; }
 
   sqlite
-    .prepare("UPDATE transactions SET category_id = ?, type = (SELECT type FROM categories WHERE id = ?), is_manual = 1 WHERE id = ?")
-    .run(category_id, category_id, id);
+    .prepare("UPDATE transactions SET category_id = ?, is_manual = 1 WHERE id = ?")
+    .run(category_id, id);
 
   let ruleCreated = false;
   const pattern = txn.description;
