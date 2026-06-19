@@ -171,10 +171,29 @@ async function categorizeAndStore(
     .all() as RuleRow[];
   const matchRule = (text: string): number | null => matchRules(text, rules);
 
+  // Map category id → type so we can validate matches before storing
+  const catById = new Map(categories.map((c) => [c.id, c.type as "income" | "expense"]));
+  const incomeCategories = categories.filter((c) => c.type === "income");
+  const expenseCategories = categories.filter((c) => c.type === "expense");
+
   const txnsWithDesc = rawTxns.map((t) => ({ ...t, description: buildDescription(t.prejemnik, t.opis) }));
-  const unknownDescriptions = [
-    ...new Set(txnsWithDesc.filter((t) => matchRule(t.description) === null).map((t) => t.description)),
+
+  // Collect unknown descriptions split by transaction type (matched rule may have wrong type)
+  const unknownIncomeDescs = [
+    ...new Set(
+      txnsWithDesc
+        .filter((t) => t.type === "income" && (matchRule(t.description) === null || catById.get(matchRule(t.description)!) !== "income"))
+        .map((t) => t.description)
+    ),
   ];
+  const unknownExpenseDescs = [
+    ...new Set(
+      txnsWithDesc
+        .filter((t) => t.type === "expense" && (matchRule(t.description) === null || catById.get(matchRule(t.description)!) !== "expense"))
+        .map((t) => t.description)
+    ),
+  ];
+  const unknownDescriptions = [...unknownIncomeDescs, ...unknownExpenseDescs];
 
   if (unknownDescriptions.length > 0) {
     emit(jobId, {
@@ -185,17 +204,27 @@ async function categorizeAndStore(
       fileIndex: fileIndex + 1,
     });
 
-    const newRules = await categorizePatternsWithGemini(unknownDescriptions, categories);
+    // Call Gemini separately for each type so it only picks from matching categories
+    const [incomeRules, expenseRules] = await Promise.all([
+      unknownIncomeDescs.length > 0
+        ? categorizePatternsWithGemini(unknownIncomeDescs, incomeCategories)
+        : Promise.resolve([]),
+      unknownExpenseDescs.length > 0
+        ? categorizePatternsWithGemini(unknownExpenseDescs, expenseCategories)
+        : Promise.resolve([]),
+    ]);
+    const newRules = [...incomeRules, ...expenseRules];
 
-    // Persist each Gemini result as an exact-match auto rule keyed by the full
-    // description, so the same description never hits Gemini again.
     const insertRule = sqlite.prepare(
       "INSERT OR IGNORE INTO category_rules (pattern, category_id, is_locked) VALUES (?, ?, 0)"
     );
     sqlite.transaction(() => {
       for (const r of newRules) {
-        insertRule.run(r.pattern, r.category_id);
-        rules.push({ pattern: r.pattern, category_id: r.category_id, conditions: null, is_locked: 0 });
+        // Only persist rule if the category type matches what we'd expect (sanity check)
+        if (catById.has(r.category_id)) {
+          insertRule.run(r.pattern, r.category_id);
+          rules.push({ pattern: r.pattern, category_id: r.category_id, conditions: null, is_locked: 0 });
+        }
       }
     })();
   }
@@ -210,7 +239,13 @@ async function categorizeAndStore(
     for (const txn of txnsWithDesc) {
       const description = txn.description;
       const manualCat = manualByKey?.get(`${txn.date}|${normalize(description)}`);
-      const categoryId = manualCat ?? matchRule(description);
+      const rawCategoryId = manualCat ?? matchRule(description);
+      // Only use category if its type matches the transaction type — prevents the
+      // mismatch that migration 017 would later clear, leaving transactions uncategorized.
+      const categoryId =
+        rawCategoryId !== null && catById.get(rawCategoryId) === txn.type
+          ? rawCategoryId
+          : null;
       insertTxn.run(
         fileId,
         txn.date,

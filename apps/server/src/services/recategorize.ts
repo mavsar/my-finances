@@ -25,6 +25,8 @@ export async function recategorizeAll(
     .prepare("SELECT id, name, type FROM categories")
     .all() as Array<{ id: number; name: string; type: string }>;
 
+  const catById = new Map(categories.map((c) => [c.id, c.type as "income" | "expense"]));
+
   const rules = sqlite
     .prepare("SELECT pattern, conditions, category_id, is_locked FROM category_rules ORDER BY is_locked DESC, length(pattern) DESC")
     .all() as MatchableRule[];
@@ -48,7 +50,7 @@ export async function recategorizeAll(
 
   for (const txn of transactions) {
     const catId = matchRules(txn.description, rules);
-    if (catId !== null) {
+    if (catId !== null && catById.get(catId) === txn.type) {
       updateCat.run(catId, txn.id);
       rulesApplied++;
     } else {
@@ -84,7 +86,7 @@ export async function recategorizeAll(
 
         sqlite.transaction(() => {
           for (const r of results) {
-            if (r.category_id) {
+            if (r.category_id && catById.get(r.category_id) === needsGemini.find((t) => t.id === r.id)?.type) {
               updateCat.run(r.category_id, r.id);
               geminiApplied++;
               const desc = descById.get(r.id);
