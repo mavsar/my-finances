@@ -247,6 +247,20 @@ const migrations: Migration[] = [
       INSERT OR IGNORE INTO categories (name, color, type) VALUES
         ('Obresti', '#facc15', 'income');
     `
+  },
+  {
+    // Sync transaction type with its assigned category type.
+    // Transactions imported from PDFs get their type from the bank (debit/credit),
+    // but manual category assignment may place an expense transaction in an income
+    // category or vice-versa. This aligns all transactions so that type always
+    // reflects the category type.
+    name: "017_sync_transaction_types",
+    sql: `
+      UPDATE transactions
+      SET type = (SELECT type FROM categories WHERE categories.id = transactions.category_id)
+      WHERE category_id IS NOT NULL
+        AND type != (SELECT type FROM categories WHERE categories.id = transactions.category_id);
+    `
   }
 ];
 
