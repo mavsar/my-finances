@@ -1350,6 +1350,7 @@ function RulesSection() {
   const [search, setSearch] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [bulkModalOpen, setBulkModalOpen] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
   const [expandedRuleId, setExpandedRuleId] = useState<number | null>(null);
 
   // Create form
@@ -1452,6 +1453,15 @@ function RulesSection() {
     setCreating(false);
     setNewConditions([{ pattern: "" }]);
     setNewCategoryId(0);
+    await load();
+  }
+
+  async function handleBulkDelete() {
+    if (!confirm(`Izbrisati ${selectedIds.size} pravil?`)) return;
+    setBulkDeleting(true);
+    await Promise.all([...selectedIds].map((id) => apiFetch(`/api/rules/${id}`, { method: "DELETE" })));
+    setSelectedIds(new Set());
+    setBulkDeleting(false);
     await load();
   }
 
@@ -1623,15 +1633,27 @@ function RulesSection() {
                       : `Izberi vseh ${filteredRules.length}`}
                   </span>
                   {selectedIds.size > 0 && (
-                    <Button
-                      variant="full"
-                      color="green"
-                      size="sm"
-                      onClick={() => setBulkModalOpen(true)}
-                      iconLeft={<Edit2 size={11}/>}
-                    >
-                      Nastavi kategorijo ({selectedIds.size})
-                    </Button>
+                    <>
+                      <Button
+                        variant="full"
+                        color="green"
+                        size="sm"
+                        onClick={() => setBulkModalOpen(true)}
+                        iconLeft={<Edit2 size={11}/>}
+                      >
+                        Nastavi kategorijo ({selectedIds.size})
+                      </Button>
+                      <Button
+                        variant="full"
+                        color="red"
+                        size="sm"
+                        disabled={bulkDeleting}
+                        onClick={() => void handleBulkDelete()}
+                        iconLeft={<Trash2 size={11}/>}
+                      >
+                        {bulkDeleting ? "Brisanje..." : `Izbriši (${selectedIds.size})`}
+                      </Button>
+                    </>
                   )}
                 </div>
 
