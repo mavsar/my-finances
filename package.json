@@ -1,0 +1,26 @@
+{
+  "name": "my-finances",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Personal finance app (React + Node + SQLite)",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev -w @my-finances/server\" \"npm run dev -w @my-finances/web\"",
+    "build": "npm run build -w @my-finances/web && npm run build -w @my-finances/server",
+    "start": "npm run start -w @my-finances/server",
+    "typecheck": "npm run typecheck -w @my-finances/web && npm run typecheck -w @my-finances/server",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "prettier": "^3.8.3",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

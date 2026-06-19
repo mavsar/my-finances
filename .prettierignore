@@ -1,0 +1,8 @@
+node_modules
+dist
+build
+coverage
+data
+apps/server/storage
+apps/web/tsconfig.tsbuildinfo
+package-lock.json
