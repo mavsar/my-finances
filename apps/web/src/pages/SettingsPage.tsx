@@ -757,6 +757,8 @@ function HistorySection() {
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState(true);
   const [sort, setSort] = useState<HistorySort>("upload");
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -770,6 +772,16 @@ function HistorySection() {
   async function handleDelete(id: number, name: string) {
     if (!confirm(`Ali res želite izbrisati "${name}" in vse njene transakcije?`)) return;
     await apiFetch(`/api/files/${id}`, { method: "DELETE" });
+    setSelectedIds((prev) => { const n = new Set(prev); n.delete(id); return n; });
+    await load();
+  }
+
+  async function handleBulkDelete() {
+    if (!confirm(`Ali res želite izbrisati ${selectedIds.size} datotek in vse njihove transakcije?`)) return;
+    setBulkDeleting(true);
+    await Promise.all([...selectedIds].map((id) => apiFetch(`/api/files/${id}`, { method: "DELETE" })));
+    setSelectedIds(new Set());
+    setBulkDeleting(false);
     await load();
   }
 
@@ -784,6 +796,18 @@ function HistorySection() {
     // "upload" — keep server order (already DESC by uploaded_at)
     return files;
   }, [files, sort]);
+
+  const allSelected = sortedFiles.length > 0 && sortedFiles.every((f) => selectedIds.has(f.id));
+  const someSelected = selectedIds.size > 0;
+  const indeterminate = someSelected && !allSelected;
+
+  function toggleAll() {
+    if (allSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(sortedFiles.map((f) => f.id)));
+    }
+  }
 
   const statusConfig: Record<UploadedFile["status"], { label: string; cls: string }> = {
     pending: { label: "V čakanju", cls: "bg-slate-500/15 text-slate-300" },
@@ -831,39 +855,100 @@ function HistorySection() {
             <SkeletonRows count={4} />
           ) : sortedFiles.length === 0 ? (
             <p className="text-sm text-slate-500 py-4 text-center">Še ni naloženih datotek.</p>
-          ) : sortedFiles.map((f) => {
-            const { label, cls } = statusConfig[f.status];
-            const fileDate = extractFileDate(f.original_name);
-            return (
-              <div key={f.id} className="group flex items-center gap-3 rounded-lg px-3 py-2.5 hover:bg-white/3 transition-colors">
-                <FileText size={15} className="text-slate-400 shrink-0" />
-                <div className="flex-1 min-w-0">
-                  <p className="truncate text-sm text-slate-200">{f.original_name}</p>
-                  {f.status === "error" && f.error_message && (
-                    <p className="truncate text-xs text-rose-400 mt-0.5">{f.error_message}</p>
-                  )}
-                  <div className="flex items-center gap-2 mt-0.5">
-                    <p className="text-xs text-slate-500">Naloženo: {formatDate(f.uploaded_at)}</p>
-                    {fileDate && (
-                      <p className="text-xs text-slate-600">· Izpisek: {formatFileDate(fileDate)}</p>
-                    )}
-                  </div>
-                </div>
-                {f.status === "done" && (
-                  <span className="text-xs text-slate-400">{f.transactions_count} txn</span>
-                )}
-                <span className={`text-xs rounded-full px-2 py-0.5 font-medium ${cls}`}>{label}</span>
-                <Button
-                  iconOnly
-                  variant="transparent"
-                  color="red"
-                  onClick={() => handleDelete(f.id, f.original_name)}
-                >
-                  <Trash2 size={13} />
-                </Button>
+          ) : (
+            <>
+              {/* Select-all header */}
+              <div className="flex items-center gap-3 px-3 py-1.5 border-b border-white/5 mb-1">
+                <Checkbox
+                  checked={allSelected}
+                  indeterminate={indeterminate}
+                  onChange={toggleAll}
+                  aria-label="Izberi vse"
+                />
+                <span className="text-xs text-slate-500">
+                  {someSelected ? `${selectedIds.size} izbranih` : "Izberi vse"}
+                </span>
               </div>
-            );
-          })}
+
+              {/* Bulk action bar */}
+              {someSelected && (
+                <div className="flex items-center gap-3 px-3 py-2 rounded-lg bg-rose-500/8 border border-rose-500/20 mb-1">
+                  <span className="text-xs text-rose-300 font-medium flex-1">
+                    {selectedIds.size} {selectedIds.size === 1 ? "datoteka izbrana" : "datotek izbranih"}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="full"
+                    color="red"
+                    disabled={bulkDeleting}
+                    onClick={() => void handleBulkDelete()}
+                  >
+                    <Trash2 size={13} />
+                    {bulkDeleting ? "Brisanje..." : `Izbriši ${selectedIds.size}`}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="transparent"
+                    color="default"
+                    onClick={() => setSelectedIds(new Set())}
+                  >
+                    <X size={13} />
+                  </Button>
+                </div>
+              )}
+
+              {sortedFiles.map((f) => {
+                const { label, cls } = statusConfig[f.status];
+                const fileDate = extractFileDate(f.original_name);
+                const isSelected = selectedIds.has(f.id);
+                return (
+                  <div
+                    key={f.id}
+                    className={`group flex items-center gap-3 rounded-lg px-3 py-2.5 transition-colors cursor-pointer ${isSelected ? "bg-white/5" : "hover:bg-white/3"}`}
+                    onClick={() => setSelectedIds((prev) => {
+                      const n = new Set(prev);
+                      isSelected ? n.delete(f.id) : n.add(f.id);
+                      return n;
+                    })}
+                  >
+                    <Checkbox
+                      checked={isSelected}
+                      onChange={(checked) => setSelectedIds((prev) => {
+                        const n = new Set(prev);
+                        checked ? n.add(f.id) : n.delete(f.id);
+                        return n;
+                      })}
+                    />
+                    <FileText size={15} className="text-slate-400 shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <p className="truncate text-sm text-slate-200">{f.original_name}</p>
+                      {f.status === "error" && f.error_message && (
+                        <p className="truncate text-xs text-rose-400 mt-0.5">{f.error_message}</p>
+                      )}
+                      <div className="flex items-center gap-2 mt-0.5">
+                        <p className="text-xs text-slate-500">Naloženo: {formatDate(f.uploaded_at)}</p>
+                        {fileDate && (
+                          <p className="text-xs text-slate-600">· Izpisek: {formatFileDate(fileDate)}</p>
+                        )}
+                      </div>
+                    </div>
+                    {f.status === "done" && (
+                      <span className="text-xs text-slate-400">{f.transactions_count} txn</span>
+                    )}
+                    <span className={`text-xs rounded-full px-2 py-0.5 font-medium ${cls}`}>{label}</span>
+                    <Button
+                      iconOnly
+                      variant="transparent"
+                      color="red"
+                      onClick={(e) => { e.stopPropagation(); void handleDelete(f.id, f.original_name); }}
+                    >
+                      <Trash2 size={13} />
+                    </Button>
+                  </div>
+                );
+              })}
+            </>
+          )}
         </div>
       )}
     </section>
