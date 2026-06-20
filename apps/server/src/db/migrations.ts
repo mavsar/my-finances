@@ -3,6 +3,13 @@ import type Database from "better-sqlite3";
 type Migration = {
   name: string;
   sql: string;
+  /**
+   * Run this migration with foreign-key enforcement disabled. Required for the
+   * 12-step table-redefinition procedure (recreate → copy → drop → rename) on a
+   * table that is the parent of foreign keys, otherwise the implicit DELETE that
+   * `DROP TABLE` performs while FKs are on would cascade and destroy child rows.
+   */
+  foreignKeysOff?: boolean;
 };
 
 const migrations: Migration[] = [
@@ -261,6 +268,92 @@ const migrations: Migration[] = [
       WHERE category_id IS NOT NULL
         AND type != (SELECT type FROM categories WHERE categories.id = transactions.category_id);
     `
+  },
+  {
+    // Allow categories that accept BOTH income and expense transactions (e.g.
+    // "Interactive Brokers"), and mark the two fallback categories as defaults.
+    //
+    // The `type` CHECK constraint can only be relaxed by rebuilding the table, and
+    // because `categories` is the parent of foreign keys (transactions, rules),
+    // this runs with foreign_keys OFF so the DROP TABLE doesn't cascade.
+    name: "018_categories_type_both_and_default",
+    foreignKeysOff: true,
+    sql: `
+      CREATE TABLE categories_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        color TEXT NOT NULL DEFAULT '#6366f1',
+        type TEXT NOT NULL DEFAULT 'expense' CHECK(type IN ('income', 'expense', 'both')),
+        is_default INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
+      INSERT INTO categories_new (id, name, color, type, created_at)
+        SELECT id, name, color, type, created_at FROM categories;
+
+      DROP TABLE categories;
+      ALTER TABLE categories_new RENAME TO categories;
+
+      UPDATE categories SET is_default = 1 WHERE name IN ('Ostali prihodki', 'Ostali odhodki');
+    `
+  },
+  {
+    // Every transaction must always belong to a category — there is no
+    // "uncategorized" state. Backfill any NULL/mismatched assignment to the
+    // appropriate fallback ("Ostali prihodki" / "Ostali odhodki" by transaction
+    // type), then rebuild the table so `category_id` becomes NOT NULL. Category
+    // deletion reassigns to the fallback instead of nulling, so the FK uses
+    // RESTRICT rather than SET NULL.
+    name: "019_transactions_require_category",
+    foreignKeysOff: true,
+    sql: `
+      -- Make sure the fallback categories exist and are flagged as defaults.
+      INSERT OR IGNORE INTO categories (name, color, type, is_default) VALUES
+        ('Ostali odhodki',  '#94a3b8', 'expense', 1),
+        ('Ostali prihodki', '#a78bfa', 'income',  1);
+      UPDATE categories SET is_default = 1 WHERE name IN ('Ostali prihodki', 'Ostali odhodki');
+
+      -- Reassign assignments whose category type can't hold this transaction type.
+      UPDATE transactions
+      SET category_id = (SELECT id FROM categories WHERE is_default = 1 AND type = transactions.type),
+          is_manual = 0
+      WHERE category_id IS NOT NULL
+        AND (SELECT type FROM categories WHERE id = transactions.category_id) NOT IN (transactions.type, 'both');
+
+      -- Backfill the remaining uncategorized rows with the fallback by type.
+      UPDATE transactions
+      SET category_id = (SELECT id FROM categories WHERE is_default = 1 AND type = transactions.type)
+      WHERE category_id IS NULL;
+
+      CREATE TABLE transactions_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_id INTEGER NOT NULL,
+        date TEXT NOT NULL,
+        description TEXT NOT NULL,
+        amount REAL NOT NULL,
+        type TEXT NOT NULL CHECK(type IN ('income', 'expense')),
+        category_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        is_manual INTEGER NOT NULL DEFAULT 0,
+        prejemnik TEXT NOT NULL DEFAULT '',
+        stanje REAL,
+        FOREIGN KEY(file_id) REFERENCES uploaded_files(id) ON DELETE CASCADE,
+        FOREIGN KEY(category_id) REFERENCES categories(id) ON DELETE RESTRICT
+      );
+
+      INSERT INTO transactions_new
+        (id, file_id, date, description, amount, type, category_id, created_at, is_manual, prejemnik, stanje)
+        SELECT id, file_id, date, description, amount, type, category_id, created_at, is_manual, prejemnik, stanje
+        FROM transactions;
+
+      DROP TABLE transactions;
+      ALTER TABLE transactions_new RENAME TO transactions;
+
+      CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date);
+      CREATE INDEX IF NOT EXISTS idx_transactions_file_id ON transactions(file_id);
+      CREATE INDEX IF NOT EXISTS idx_transactions_category_id ON transactions(category_id);
+      CREATE INDEX IF NOT EXISTS idx_transactions_type ON transactions(type);
+    `
   }
 ];
 
@@ -283,9 +376,21 @@ export function runMigrations(sqlite: Database.Database): void {
 
     const applyMigration = sqlite.transaction(() => {
       sqlite.exec(migration.sql);
+      // Catch dangling references introduced by a table rebuild before committing.
+      if (migration.foreignKeysOff) {
+        const violations = sqlite.pragma("foreign_key_check") as unknown[];
+        if (Array.isArray(violations) && violations.length > 0) {
+          throw new Error(
+            `Migration ${migration.name} left foreign key violations: ${JSON.stringify(violations)}`
+          );
+        }
+      }
       insertMigration.run(migration.name);
     });
 
+    // `PRAGMA foreign_keys` is a no-op inside a transaction, so it must be toggled
+    // here (before BEGIN) and the value set now stays in effect for the duration.
+    if (migration.foreignKeysOff) sqlite.pragma("foreign_keys = OFF");
     try {
       applyMigration();
     } catch (e) {
@@ -301,6 +406,8 @@ export function runMigrations(sqlite: Database.Database): void {
       } else {
         throw e;
       }
+    } finally {
+      if (migration.foreignKeysOff) sqlite.pragma("foreign_keys = ON");
     }
   }
 }

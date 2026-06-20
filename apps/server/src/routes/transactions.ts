@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 import { z } from "zod";
 import { sqlite } from "../db/client.js";
 import { recategorizeAll } from "../services/recategorize.js";
+import { categoryAccepts } from "../services/category-utils.js";
 
 export const transactionsRouter = Router();
 
@@ -70,10 +71,19 @@ transactionsRouter.patch("/:id/category", (req, res) => {
   const { category_id, create_rule } = parsed.data;
 
   const txn = sqlite
-    .prepare("SELECT id, description FROM transactions WHERE id = ?")
-    .get(id) as { id: number; description: string } | undefined;
+    .prepare("SELECT id, description, type FROM transactions WHERE id = ?")
+    .get(id) as { id: number; description: string; type: "income" | "expense" } | undefined;
 
   if (!txn) { res.status(404).json({ error: "Transakcija ne obstaja" }); return; }
+
+  const category = sqlite
+    .prepare("SELECT type FROM categories WHERE id = ?")
+    .get(category_id) as { type: string } | undefined;
+  if (!category) { res.status(404).json({ error: "Kategorija ne obstaja" }); return; }
+  if (!categoryAccepts(category.type, txn.type)) {
+    res.status(400).json({ error: "Kategorija ne sprejema tega tipa transakcije" });
+    return;
+  }
 
   sqlite
     .prepare("UPDATE transactions SET category_id = ?, is_manual = 1 WHERE id = ?")

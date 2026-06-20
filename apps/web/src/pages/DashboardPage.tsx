@@ -473,7 +473,7 @@ function TransactionList({ from, to, categoryId, onCategoryChange }: { from?: st
               const selectedTxns = transactions.filter((t) => selectedIds.has(t.id));
               const types = new Set(selectedTxns.map((t) => t.type));
               const sharedType = types.size === 1 ? [...types][0] : null;
-              return (sharedType ? categories.filter((c) => c.type === sharedType) : categories)
+              return (sharedType ? categories.filter((c) => c.type === sharedType || c.type === "both") : categories)
                 .map((c) => ({ value: c.id, label: c.name, color: c.color }));
             })()}
             nullable
@@ -550,9 +550,7 @@ function TransactionList({ from, to, categoryId, onCategoryChange }: { from?: st
                           size="sm"
                           value={t.category_id ?? null}
                           onChange={(val) => { if (val !== null) void handleCategoryChange(t.id, val as number); }}
-                          options={categories.filter((c) => c.type === t.type).map((c) => ({ value: c.id, label: c.name, color: c.color }))}
-                          nullable
-                          nullLabel="— nedoločeno —"
+                          options={categories.filter((c) => c.type === t.type || c.type === "both").map((c) => ({ value: c.id, label: c.name, color: c.color }))}
                           className="max-w-[200px]"
                         />
                         {changed[t.id] && (

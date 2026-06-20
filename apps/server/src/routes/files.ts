@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from "uuid";
 import { sqlite } from "../db/client.js";
 import { parseTransactionsRaw, categorizePatternsWithGemini, type RawTransaction } from "../services/gemini.js";
 import { matchRules, normalize, type MatchableRule } from "../services/rule-match.js";
+import { categoryAccepts, getDefaultCategoryId } from "../services/category-utils.js";
 
 const uploadsDir = process.env.UPLOADS_PATH?.trim()
   ? path.resolve(process.env.UPLOADS_PATH)
@@ -172,24 +173,26 @@ async function categorizeAndStore(
   const matchRule = (text: string): number | null => matchRules(text, rules);
 
   // Map category id → type so we can validate matches before storing
-  const catById = new Map(categories.map((c) => [c.id, c.type as "income" | "expense"]));
-  const incomeCategories = categories.filter((c) => c.type === "income");
-  const expenseCategories = categories.filter((c) => c.type === "expense");
+  const catById = new Map(categories.map((c) => [c.id, c.type]));
+  // "both"-type categories are valid candidates for income AND expense.
+  const incomeCategories = categories.filter((c) => categoryAccepts(c.type, "income"));
+  const expenseCategories = categories.filter((c) => categoryAccepts(c.type, "expense"));
 
   const txnsWithDesc = rawTxns.map((t) => ({ ...t, description: buildDescription(t.prejemnik, t.opis) }));
 
-  // Collect unknown descriptions split by transaction type (matched rule may have wrong type)
+  // Collect unknown descriptions split by transaction type (matched rule may point
+  // at a category that can't hold this transaction type).
   const unknownIncomeDescs = [
     ...new Set(
       txnsWithDesc
-        .filter((t) => t.type === "income" && (matchRule(t.description) === null || catById.get(matchRule(t.description)!) !== "income"))
+        .filter((t) => t.type === "income" && (matchRule(t.description) === null || !categoryAccepts(catById.get(matchRule(t.description)!), "income")))
         .map((t) => t.description)
     ),
   ];
   const unknownExpenseDescs = [
     ...new Set(
       txnsWithDesc
-        .filter((t) => t.type === "expense" && (matchRule(t.description) === null || catById.get(matchRule(t.description)!) !== "expense"))
+        .filter((t) => t.type === "expense" && (matchRule(t.description) === null || !categoryAccepts(catById.get(matchRule(t.description)!), "expense")))
         .map((t) => t.description)
     ),
   ];
@@ -239,13 +242,12 @@ async function categorizeAndStore(
     for (const txn of txnsWithDesc) {
       const description = txn.description;
       const manualCat = manualByKey?.get(`${txn.date}|${normalize(description)}`);
-      const rawCategoryId = manualCat ?? matchRule(description);
-      // Only use category if its type matches the transaction type — prevents the
-      // mismatch that migration 017 would later clear, leaving transactions uncategorized.
-      const categoryId =
-        rawCategoryId !== null && catById.get(rawCategoryId) === txn.type
-          ? rawCategoryId
-          : null;
+      const matched = manualCat ?? matchRule(description);
+      // A category is usable only if it can hold this transaction type. Anything
+      // else falls back to "Ostali prihodki" / "Ostali odhodki" — a transaction is
+      // never left uncategorized.
+      const usable = matched !== null && categoryAccepts(catById.get(matched), txn.type);
+      const categoryId = usable ? matched! : getDefaultCategoryId(txn.type);
       insertTxn.run(
         fileId,
         txn.date,
@@ -255,7 +257,7 @@ async function categorizeAndStore(
         txn.type,
         categoryId,
         txn.stanje ?? null,
-        manualCat != null ? 1 : 0
+        usable && manualCat != null ? 1 : 0
       );
     }
   })();

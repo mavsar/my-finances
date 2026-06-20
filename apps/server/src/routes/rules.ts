@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { sqlite } from "../db/client.js";
 import { parseConditions, evaluateConditions, matchRules, ruleMatches, type RuleCondition, type MatchableRule } from "../services/rule-match.js";
+import { categoryAccepts } from "../services/category-utils.js";
 
 export const rulesRouter = Router();
 
@@ -188,22 +189,41 @@ function applyConditionsToTransactions(
   categoryId: number,
   conditions: RuleCondition[]
 ): void {
-  const txns = sqlite
-    .prepare("SELECT id, description FROM transactions WHERE is_manual = 0")
-    .all() as { id: number; description: string }[];
+  const catType = (
+    sqlite.prepare("SELECT type FROM categories WHERE id = ?").get(categoryId) as
+      | { type: string }
+      | undefined
+  )?.type;
+  if (!catType) return;
 
-  const candidates = txns.filter((t) => evaluateConditions(t.description, conditions));
+  const txns = sqlite
+    .prepare("SELECT id, description, type FROM transactions WHERE is_manual = 0")
+    .all() as { id: number; description: string; type: "income" | "expense" }[];
+
+  // Only transactions whose type this category can hold are candidates — a rule
+  // pointing at an income category never touches an expense transaction.
+  const candidates = txns.filter(
+    (t) => categoryAccepts(catType, t.type) && evaluateConditions(t.description, conditions)
+  );
   if (candidates.length === 0) return;
 
-  // Load ALL rules in priority order so the most-specific rule wins
+  // Load ALL rules in priority order so the most-specific rule wins, plus a
+  // category-type lookup to keep the winning rule type-compatible.
   const allRules = sqlite
     .prepare("SELECT pattern, conditions, category_id, is_locked FROM category_rules ORDER BY is_locked DESC, length(pattern) DESC")
     .all() as MatchableRule[];
+  const catTypeById = new Map(
+    (sqlite.prepare("SELECT id, type FROM categories").all() as { id: number; type: string }[]).map(
+      (c) => [c.id, c.type]
+    )
+  );
 
   const update = sqlite.prepare("UPDATE transactions SET category_id = ? WHERE id = ?");
   sqlite.transaction(() => {
     for (const t of candidates) {
-      const correctCatId = matchRules(t.description, allRules) ?? categoryId;
+      const matched = matchRules(t.description, allRules);
+      const correctCatId =
+        matched !== null && categoryAccepts(catTypeById.get(matched), t.type) ? matched : categoryId;
       update.run(correctCatId, t.id);
     }
   })();

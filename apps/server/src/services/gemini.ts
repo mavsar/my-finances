@@ -67,6 +67,13 @@ function getClient(): GoogleGenAI {
   return client;
 }
 
+/** Human label for a category's accepted transaction type(s), used in AI prompts. */
+function categoryTypeLabel(type: string): string {
+  if (type === "income") return "prihodek";
+  if (type === "expense") return "odhodek";
+  return "prihodek ali odhodek";
+}
+
 function checkApiKey() {
   if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === "your_gemini_api_key_here") {
     throw new Error("GEMINI_API_KEY ni nastavljen v .env datoteki");
@@ -314,7 +321,7 @@ export async function categorizePatternsWithGemini(
   if (patterns.length === 0) return [];
 
   const categoryList = categories
-    .map((c) => `ID ${c.id}: ${c.name} (${c.type === "income" ? "prihodek" : "odhodek"})`)
+    .map((c) => `ID ${c.id}: ${c.name} (${categoryTypeLabel(c.type)})`)
     .join("\n");
 
   const patternList = patterns.map((p, i) => `${i + 1}. "${p}"`).join("\n");
@@ -375,7 +382,7 @@ export async function parseTransactionsWithGemini(
   checkApiKey();
 
   const categoryList = categories
-    .map((c) => `ID ${c.id}: ${c.name} (${c.type === "income" ? "prihodek" : "odhodek"})`)
+    .map((c) => `ID ${c.id}: ${c.name} (${categoryTypeLabel(c.type)})`)
     .join("\n");
 
   const truncatedText =
@@ -455,7 +462,7 @@ export async function categorizeBatchWithGemini(
   checkApiKey();
 
   const categoryList = categories
-    .map((c) => `ID ${c.id}: ${c.name} (${c.type === "income" ? "prihodek" : "odhodek"})`)
+    .map((c) => `ID ${c.id}: ${c.name} (${categoryTypeLabel(c.type)})`)
     .join("\n");
 
   const txnList = transactions

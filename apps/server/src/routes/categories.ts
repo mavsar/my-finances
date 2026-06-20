@@ -22,7 +22,7 @@ categoriesRouter.get("/", (_req, res) => {
 const categorySchema = z.object({
   name: z.string().min(1).max(60),
   color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
-  type: z.enum(["income", "expense"]),
+  type: z.enum(["income", "expense", "both"]),
 });
 
 categoriesRouter.post("/", (req, res) => {
@@ -66,7 +66,23 @@ categoriesRouter.put("/:id", (req, res) => {
   values.push(id);
 
   try {
-    sqlite.prepare(`UPDATE categories SET ${updates.join(", ")} WHERE id = ?`).run(...values);
+    sqlite.transaction(() => {
+      sqlite.prepare(`UPDATE categories SET ${updates.join(", ")} WHERE id = ?`).run(...values);
+
+      // Narrowing a category's type (e.g. "both" → "income") evicts the
+      // transactions it can no longer hold, moving them to the fallback category
+      // for their own type so nothing is left in an incompatible category.
+      if (type !== undefined && type !== "both") {
+        sqlite
+          .prepare(
+            `UPDATE transactions
+             SET category_id = (SELECT id FROM categories WHERE is_default = 1 AND type = transactions.type),
+                 is_manual = 0
+             WHERE category_id = ? AND type != ?`
+          )
+          .run(id, type);
+      }
+    })();
     res.json(sqlite.prepare("SELECT * FROM categories WHERE id = ?").get(id));
   } catch (e: unknown) {
     if (e instanceof Error && e.message.includes("UNIQUE")) {
@@ -81,7 +97,26 @@ categoriesRouter.delete("/:id", (req, res) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) { res.status(400).json({ error: "Neveljaven ID" }); return; }
 
-  sqlite.prepare("UPDATE transactions SET category_id = NULL WHERE category_id = ?").run(id);
-  sqlite.prepare("DELETE FROM categories WHERE id = ?").run(id);
+  const existing = sqlite
+    .prepare("SELECT is_default FROM categories WHERE id = ?")
+    .get(id) as { is_default: number } | undefined;
+  if (!existing) { res.status(404).json({ error: "Kategorija ne obstaja" }); return; }
+  if (existing.is_default) {
+    res.status(400).json({ error: "Privzete kategorije ni mogoče izbrisati" });
+    return;
+  }
+
+  // Every transaction must keep a category, so reassign affected rows to the
+  // fallback for their type before deleting (the FK is RESTRICT, not SET NULL).
+  sqlite.transaction(() => {
+    sqlite
+      .prepare(
+        `UPDATE transactions
+         SET category_id = (SELECT id FROM categories WHERE is_default = 1 AND type = transactions.type)
+         WHERE category_id = ?`
+      )
+      .run(id);
+    sqlite.prepare("DELETE FROM categories WHERE id = ?").run(id);
+  })();
   res.status(204).end();
 });

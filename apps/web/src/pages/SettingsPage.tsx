@@ -32,7 +32,8 @@ interface Category {
   id: number;
   name: string;
   color: string;
-  type: "income" | "expense";
+  type: "income" | "expense" | "both";
+  is_default?: number;
   transaction_count: number;
 }
 
@@ -189,7 +190,7 @@ function CategoriesSection() {
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<Category | null>(null);
   const [adding, setAdding] = useState(false);
-  const [newCat, setNewCat] = useState({ name: "", color: "#22c55e", type: "expense" as "income" | "expense" });
+  const [newCat, setNewCat] = useState({ name: "", color: "#22c55e", type: "expense" as "income" | "expense" | "both" });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -347,18 +348,24 @@ function CategoriesSection() {
               <span className="h-3 w-3 rounded-full shrink-0" style={{ background: c.color }} />
               <span className="flex-1 text-sm text-slate-200">{c.name}</span>
               <span className={`text-xs px-2 py-0.5 rounded-full ${
-                c.type === "income" ? "bg-emerald-500/15 text-emerald-300" : "bg-rose-500/15 text-rose-300"
+                c.type === "income"
+                  ? "bg-emerald-500/15 text-emerald-300"
+                  : c.type === "expense"
+                    ? "bg-rose-500/15 text-rose-300"
+                    : "bg-indigo-500/15 text-indigo-300"
               }`}>
-                {c.type === "income" ? "prihodek" : "odhodek"}
+                {c.type === "income" ? "prihodek" : c.type === "expense" ? "odhodek" : "oboje"}
               </span>
               <span className="text-xs text-slate-500">{c.transaction_count} txn</span>
               <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                 <Button iconOnly variant="transparent" color="default" onClick={() => openEdit(c)}>
                   <Edit2 size={13} />
                 </Button>
-                <Button iconOnly variant="transparent" color="red" onClick={() => handleDelete(c.id)}>
-                  <Trash2 size={13} />
-                </Button>
+                {!c.is_default && (
+                  <Button iconOnly variant="transparent" color="red" onClick={() => handleDelete(c.id)}>
+                    <Trash2 size={13} />
+                  </Button>
+                )}
               </div>
             </div>
           ))}
@@ -373,8 +380,8 @@ function CategoryForm({
 }: {
   name: string;
   color: string;
-  type: "income" | "expense";
-  onChange: (fields: Partial<{ name: string; color: string; type: "income" | "expense" }>) => void;
+  type: "income" | "expense" | "both";
+  onChange: (fields: Partial<{ name: string; color: string; type: "income" | "expense" | "both" }>) => void;
 }) {
   return (
     <div className="space-y-3">
@@ -387,10 +394,11 @@ function CategoryForm({
         />
         <Combobox
           value={type}
-          onChange={(val) => onChange({ type: val as "income" | "expense" })}
+          onChange={(val) => onChange({ type: val as "income" | "expense" | "both" })}
           options={[
             { value: "expense", label: "Odhodek" },
             { value: "income", label: "Prihodek" },
+            { value: "both", label: "Oboje" },
           ]}
           searchable={false}
           className="w-32 shrink-0"
