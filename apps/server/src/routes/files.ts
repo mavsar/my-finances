@@ -4,9 +4,11 @@ import { Router, type Response } from "express";
 import multer from "multer";
 import { v4 as uuidv4 } from "uuid";
 import { sqlite } from "../db/client.js";
-import { parseTransactionsRaw, categorizePatternsWithGemini, type RawTransaction } from "../services/gemini.js";
-import { matchRules, normalize, type MatchableRule } from "../services/rule-match.js";
+import { parseTransactionsRaw, type RawTransaction } from "../services/gemini.js";
+import { matchRules, findMatchingRule, normalize, type MatchableRule } from "../services/rule-match.js";
 import { categoryAccepts, getDefaultCategoryId } from "../services/category-utils.js";
+import { smartCategorize, type SmartCatInput, type SmartCatResult } from "../services/smart-categorize.js";
+import { buildProposalGroups, requestReview, applyReviewDecisions } from "../services/review-gate.js";
 
 const uploadsDir = process.env.UPLOADS_PATH?.trim()
   ? path.resolve(process.env.UPLOADS_PATH)
@@ -164,6 +166,8 @@ async function categorizeAndStore(
   rawTxns: RawTransaction[],
   categories: Array<{ id: number; name: string; type: string }>,
   fileIndex: number,
+  smartCache: Map<string, SmartCatResult>,
+  proposalResults: SmartCatResult[],
   manualByKey?: Map<string, number>
 ): Promise<{ savedCount: number; duplicatesRemoved: number }> {
   type RuleRow = MatchableRule;
@@ -174,59 +178,72 @@ async function categorizeAndStore(
 
   // Map category id → type so we can validate matches before storing
   const catById = new Map(categories.map((c) => [c.id, c.type]));
-  // "both"-type categories are valid candidates for income AND expense.
-  const incomeCategories = categories.filter((c) => categoryAccepts(c.type, "income"));
-  const expenseCategories = categories.filter((c) => categoryAccepts(c.type, "expense"));
+  const defaultIdSet = new Set([getDefaultCategoryId("income"), getDefaultCategoryId("expense")]);
+
+  // A rule match is only "strong" (trusted to skip the AI) if it's a locked user
+  // rule, or an auto rule pointing at a REAL category. An auto rule pointing at a
+  // fallback ("Ostali …") is a stale placeholder — re-attempt it with the AI.
+  const strongMatch = (description: string, type: "income" | "expense"): number | null => {
+    const matched = findMatchingRule(description, rules);
+    if (
+      matched !== null &&
+      categoryAccepts(catById.get(matched.category_id), type) &&
+      (matched.is_locked === 1 || !defaultIdSet.has(matched.category_id))
+    ) {
+      return matched.category_id;
+    }
+    return null;
+  };
 
   const txnsWithDesc = rawTxns.map((t) => ({ ...t, description: buildDescription(t.prejemnik, t.opis) }));
 
-  // Collect unknown descriptions split by transaction type (matched rule may point
-  // at a category that can't hold this transaction type).
-  const unknownIncomeDescs = [
-    ...new Set(
-      txnsWithDesc
-        .filter((t) => t.type === "income" && (matchRule(t.description) === null || !categoryAccepts(catById.get(matchRule(t.description)!), "income")))
-        .map((t) => t.description)
-    ),
-  ];
-  const unknownExpenseDescs = [
-    ...new Set(
-      txnsWithDesc
-        .filter((t) => t.type === "expense" && (matchRule(t.description) === null || !categoryAccepts(catById.get(matchRule(t.description)!), "expense")))
-        .map((t) => t.description)
-    ),
-  ];
-  const unknownDescriptions = [...unknownIncomeDescs, ...unknownExpenseDescs];
+  // Unique descriptions with no strong rule that can hold their transaction type —
+  // these need the AI. Carry the transaction type so the model only picks
+  // compatible categories (and proposes a correctly-typed new one).
+  const unknownItems: SmartCatInput[] = [];
+  const seenUnknown = new Set<string>();
+  for (const t of txnsWithDesc) {
+    if (strongMatch(t.description, t.type) !== null) continue;
+    const key = `${t.type}|${t.description}`;
+    if (seenUnknown.has(key)) continue;
+    seenUnknown.add(key);
+    unknownItems.push({ description: t.description, type: t.type });
+  }
 
-  if (unknownDescriptions.length > 0) {
+  // AI decisions that matched an existing category, so the store step below trusts
+  // them over any stale auto rule still sitting in the in-memory `rules` array.
+  const aiExisting = new Map<string, number>();
+
+  if (unknownItems.length > 0) {
     emit(jobId, {
       type: "step",
       step: "categorizing",
-      message: `Kategoriziranje ${unknownDescriptions.length} novih transakcij z AI...`,
+      message: `Kategoriziranje ${unknownItems.length} novih transakcij z AI (s spletnim iskanjem)...`,
       progress: 65,
       fileIndex: fileIndex + 1,
     });
 
-    // Call Gemini separately for each type so it only picks from matching categories
-    const [incomeRules, expenseRules] = await Promise.all([
-      unknownIncomeDescs.length > 0
-        ? categorizePatternsWithGemini(unknownIncomeDescs, incomeCategories)
-        : Promise.resolve([]),
-      unknownExpenseDescs.length > 0
-        ? categorizePatternsWithGemini(unknownExpenseDescs, expenseCategories)
-        : Promise.resolve([]),
-    ]);
-    const newRules = [...incomeRules, ...expenseRules];
+    // Only research descriptions we haven't already resolved in an earlier file.
+    const toResolve = unknownItems.filter((u) => !smartCache.has(`${u.type}|${u.description}`));
+    const fresh = await smartCategorize(toResolve, categories);
+    for (const r of fresh) smartCache.set(`${r.type}|${r.description}`, r);
 
+    // Upsert (not INSERT OR IGNORE) so a fresh AI decision overwrites a stale auto
+    // rule that previously pointed the same description at a fallback.
     const insertRule = sqlite.prepare(
-      "INSERT OR IGNORE INTO category_rules (pattern, category_id, is_locked) VALUES (?, ?, 0)"
+      "INSERT INTO category_rules (pattern, category_id, is_locked) VALUES (?, ?, 0) ON CONFLICT(pattern) DO UPDATE SET category_id = excluded.category_id WHERE is_locked = 0"
     );
     sqlite.transaction(() => {
-      for (const r of newRules) {
-        // Only persist rule if the category type matches what we'd expect (sanity check)
-        if (catById.has(r.category_id)) {
-          insertRule.run(r.pattern, r.category_id);
-          rules.push({ pattern: r.pattern, category_id: r.category_id, conditions: null, is_locked: 0 });
+      for (const u of unknownItems) {
+        const r = smartCache.get(`${u.type}|${u.description}`);
+        if (!r) continue;
+        if (r.category_id !== null && categoryAccepts(catById.get(r.category_id), u.type)) {
+          // AI matched an existing category — persist as an exact-match auto rule.
+          insertRule.run(r.description, r.category_id);
+          aiExisting.set(`${u.type}|${r.description}`, r.category_id);
+        } else if (r.proposal) {
+          // AI suggests a new category — defer to the end-of-job review.
+          proposalResults.push(r);
         }
       }
     })();
@@ -242,7 +259,11 @@ async function categorizeAndStore(
     for (const txn of txnsWithDesc) {
       const description = txn.description;
       const manualCat = manualByKey?.get(`${txn.date}|${normalize(description)}`);
-      const matched = manualCat ?? matchRule(description);
+      // Prefer (1) the user's manual choice, (2) a fresh AI existing-category match,
+      // then (3) a rule. The AI match comes before the rule lookup so it wins over a
+      // stale auto rule that still maps this description to a fallback.
+      const matched =
+        manualCat ?? aiExisting.get(`${txn.type}|${description}`) ?? matchRule(description);
       // A category is usable only if it can hold this transaction type. Anything
       // else falls back to "Ostali prihodki" / "Ostali odhodki" — a transaction is
       // never left uncategorized.
@@ -308,7 +329,9 @@ async function recheckExistingFile(
   file: Express.Multer.File,
   existingFileId: number,
   fileIndex: number,
-  categories: Array<{ id: number; name: string; type: string }>
+  categories: Array<{ id: number; name: string; type: string }>,
+  smartCache: Map<string, SmartCatResult>,
+  proposalResults: SmartCatResult[]
 ) {
   emit(jobId, {
     type: "file_start",
@@ -368,7 +391,7 @@ async function recheckExistingFile(
     });
 
     sqlite.prepare("DELETE FROM transactions WHERE file_id = ?").run(existingFileId);
-    const { savedCount } = await categorizeAndStore(jobId, existingFileId, freshTxns, categories, fileIndex, manualByKey);
+    const { savedCount } = await categorizeAndStore(jobId, existingFileId, freshTxns, categories, fileIndex, smartCache, proposalResults, manualByKey);
 
     sqlite
       .prepare("UPDATE uploaded_files SET transactions_count = ?, processed_at = CURRENT_TIMESTAMP WHERE id = ?")
@@ -450,6 +473,12 @@ async function processFiles(jobId: string, files: Express.Multer.File[]) {
     .prepare("SELECT id, name, type FROM categories")
     .all() as Array<{ id: number; name: string; type: string }>;
 
+  // Shared across all files in the job: a cache so the same description isn't
+  // researched twice, and a collector for new-category suggestions reviewed once
+  // at the end.
+  const smartCache = new Map<string, SmartCatResult>();
+  const proposalResults: SmartCatResult[] = [];
+
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
 
@@ -460,7 +489,7 @@ async function processFiles(jobId: string, files: Express.Multer.File[]) {
     if (existing) {
       if (existing.status === "done") {
         // Re-upload of an already-processed file → run recheck instead of erroring
-        await recheckExistingFile(jobId, file, existing.id, i, categories);
+        await recheckExistingFile(jobId, file, existing.id, i, categories, smartCache, proposalResults);
       } else {
         emit(jobId, {
           type: "file_error",
@@ -504,7 +533,9 @@ async function processFiles(jobId: string, files: Express.Multer.File[]) {
         Number(fileId),
         rawTxns,
         categories,
-        i
+        i,
+        smartCache,
+        proposalResults
       );
 
       sqlite
@@ -529,6 +560,22 @@ async function processFiles(jobId: string, files: Express.Multer.File[]) {
 
       emit(jobId, { type: "file_error", fileName: file.originalname, error: message, fileIndex: i + 1 });
     }
+  }
+
+  // ── End-of-job review: ask once about all suggested new categories ──────────
+  const uniqueProposals = [
+    ...new Map(proposalResults.map((r) => [`${r.type}|${r.description}`, r])).values(),
+  ];
+  const groups = buildProposalGroups(uniqueProposals);
+  if (groups.length > 0) {
+    emit(jobId, {
+      type: "step",
+      step: "review",
+      message: `AI predlaga ${groups.length} ${groups.length === 1 ? "novo kategorijo" : "novih kategorij"} — potreben pregled.`,
+      progress: 96,
+    });
+    const decisions = await requestReview(jobId, groups, (e) => emit(jobId, e as JobEvent));
+    applyReviewDecisions(groups, decisions, (e) => emit(jobId, e as JobEvent));
   }
 
   job.status = "done";

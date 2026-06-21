@@ -127,9 +127,20 @@ export function matchRules(
   text: string,
   rules: MatchableRule[]
 ): number | null {
+  return findMatchingRule(text, rules)?.category_id ?? null;
+}
+
+/**
+ * Like {@link matchRules} but returns the matching rule itself, so callers can
+ * inspect whether it's a locked (user) rule or an auto rule before trusting it.
+ */
+export function findMatchingRule(
+  text: string,
+  rules: MatchableRule[]
+): MatchableRule | null {
   for (const rule of rules) {
     if (ruleMatches(rule, text)) {
-      return rule.category_id;
+      return rule;
     }
   }
   return null;

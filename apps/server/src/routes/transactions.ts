@@ -127,11 +127,22 @@ function emitReJob(jobId: string, event: Record<string, unknown>) {
 }
 
 transactionsRouter.post("/recategorize", (req, res) => {
-  const scope = (req.body as { scope?: string })?.scope === "uncategorized" ? "uncategorized" : "all";
+  const body = (req.body ?? {}) as { scope?: string; categoryIds?: unknown };
+  const scope = body.scope === "category" ? "category" : "all";
+  const categoryIds =
+    scope === "category" && Array.isArray(body.categoryIds)
+      ? (body.categoryIds as unknown[]).filter((id): id is number => Number.isInteger(id)).map(Number)
+      : undefined;
+
+  if (scope === "category" && (!categoryIds || categoryIds.length === 0)) {
+    res.status(400).json({ error: "Manjka veljaven categoryIds" });
+    return;
+  }
+
   const jobId = uuidv4();
   reJobs.set(jobId, { status: "running", events: [], clients: [] });
 
-  void runRecategorize(jobId, scope as "all" | "uncategorized");
+  void runRecategorize(jobId, scope, categoryIds);
 
   res.json({ jobId });
 });
@@ -162,9 +173,9 @@ transactionsRouter.get("/recategorize/:jobId/events", (req, res) => {
   });
 });
 
-async function runRecategorize(jobId: string, scope: "all" | "uncategorized") {
+async function runRecategorize(jobId: string, scope: "all" | "uncategorized" | "category", categoryIds?: number[]) {
   try {
-    await recategorizeAll(scope, (evt) => emitReJob(jobId, evt));
+    await recategorizeAll(scope, jobId, (evt) => emitReJob(jobId, evt), categoryIds);
   } catch (err) {
     emitReJob(jobId, { type: "error", message: err instanceof Error ? err.message : "Napaka" });
   }

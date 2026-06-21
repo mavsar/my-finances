@@ -24,6 +24,14 @@ import { Checkbox } from "../components/Checkbox";
 import { Combobox } from "../components/Combobox";
 import { Input } from "../components/Input";
 import { Modal } from "../components/Modal";
+import { CategoryReviewModal, type ReviewGroup, type ReviewCategory, type ReviewDecision } from "../components/CategoryReviewModal";
+import {
+  ConditionsBuilder,
+  RuleMatchPreview,
+  parseRuleConditions,
+  formatConditionsLabel,
+  type RuleCondition,
+} from "../components/RuleEditorModal";
 import { normalize } from "../lib/utils";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -35,6 +43,14 @@ interface Category {
   type: "income" | "expense" | "both";
   is_default?: number;
   transaction_count: number;
+}
+
+interface ReJob {
+  active: boolean;
+  done: boolean;
+  messages: Array<{ text: string; type: "info" | "success" | "error" }>;
+  progress: number;
+  status?: string;
 }
 
 interface UploadedFile {
@@ -119,10 +135,9 @@ function formatDate(iso: string) {
 // ─── Settings Page ─────────────────────────────────────────────────────────────
 
 const TABS = [
-  { id: "kategorije",     label: "Kategorije" },
-  { id: "pravila",        label: "Pravila" },
-  { id: "kategorizacija", label: "Kategorizacija" },
-  { id: "datoteke",       label: "Datoteke" },
+  { id: "kategorije", label: "Kategorije" },
+  { id: "pravila",    label: "Pravila" },
+  { id: "datoteke",   label: "Datoteke" },
 ] as const;
 
 type TabId = typeof TABS[number]["id"];
@@ -154,9 +169,12 @@ export function SettingsPage() {
         ))}
       </div>
 
-      {tab === "kategorije" && <CategoriesSection />}
+      {tab === "kategorije" && (
+        <div className="space-y-6">
+          <CategoriesSection />
+        </div>
+      )}
       {tab === "pravila" && <RulesSection />}
-      {tab === "kategorizacija" && <RecategorizeSection />}
       {tab === "datoteke" && (
         <div className="space-y-6">
           <UploadSection />
@@ -186,6 +204,7 @@ function SkeletonRows({ count = 5 }: { count?: number }) {
 // ─── Categories Section ────────────────────────────────────────────────────────
 
 function CategoriesSection() {
+  // --- CRUD state ---
   const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<Category | null>(null);
@@ -193,6 +212,14 @@ function CategoriesSection() {
   const [newCat, setNewCat] = useState({ name: "", color: "#22c55e", type: "expense" as "income" | "expense" | "both" });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+
+  // --- Selection + recategorize state ---
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [reJob, setReJob] = useState<ReJob | null>(null);
+  const [review, setReview] = useState<ReviewGroup[] | null>(null);
+  const [reviewSubmitting, setReviewSubmitting] = useState(false);
+  const esRef = useRef<EventSource | null>(null);
+  const jobIdRef = useRef<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -203,26 +230,10 @@ function CategoriesSection() {
 
   useEffect(() => { void load(); }, [load]);
 
-  function openAdd() {
-    setNewCat({ name: "", color: "#22c55e", type: "expense" });
-    setError("");
-    setAdding(true);
-  }
-
-  function closeAdd() {
-    setAdding(false);
-    setError("");
-  }
-
-  function openEdit(c: Category) {
-    setEditing(c);
-    setError("");
-  }
-
-  function closeEdit() {
-    setEditing(null);
-    setError("");
-  }
+  function openAdd() { setNewCat({ name: "", color: "#22c55e", type: "expense" }); setError(""); setAdding(true); }
+  function closeAdd() { setAdding(false); setError(""); }
+  function openEdit(c: Category) { setEditing(c); setError(""); }
+  function closeEdit() { setEditing(null); setError(""); }
 
   async function handleAdd() {
     if (!newCat.name.trim()) { setError("Ime kategorije je obvezno"); return; }
@@ -232,13 +243,8 @@ function CategoriesSection() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(newCat),
     });
-    if (res.ok) {
-      closeAdd();
-      await load();
-    } else {
-      const d = await res.json() as { error?: string };
-      setError(d.error ?? "Napaka pri shranjevanju");
-    }
+    if (res.ok) { closeAdd(); await load(); }
+    else { const d = await res.json() as { error?: string }; setError(d.error ?? "Napaka pri shranjevanju"); }
     setSaving(false);
   }
 
@@ -250,13 +256,8 @@ function CategoriesSection() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: editing.name, color: editing.color, type: editing.type }),
     });
-    if (res.ok) {
-      closeEdit();
-      await load();
-    } else {
-      const d = await res.json() as { error?: string };
-      setError(d.error ?? "Napaka pri shranjevanju");
-    }
+    if (res.ok) { closeEdit(); await load(); }
+    else { const d = await res.json() as { error?: string }; setError(d.error ?? "Napaka pri shranjevanju"); }
     setSaving(false);
   }
 
@@ -266,98 +267,223 @@ function CategoriesSection() {
     await load();
   }
 
+  // --- Selection helpers ---
+  const allSelected = categories.length > 0 && categories.every((c) => selected.has(c.id));
+  function toggleAll() {
+    setSelected(allSelected ? new Set() : new Set(categories.map((c) => c.id)));
+  }
+  function toggleOne(id: number) {
+    setSelected((prev) => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
+  }
+
+  // --- Recategorize ---
+  async function submitReview(decisions: ReviewDecision[]) {
+    if (!jobIdRef.current) return;
+    setReviewSubmitting(true);
+    try {
+      await apiFetch(`/api/categorization/jobs/${jobIdRef.current}/review`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decisions }),
+      });
+      setReview(null);
+      void load();
+    } finally { setReviewSubmitting(false); }
+  }
+
+  async function startRecategorize(scope: "all" | "category", categoryIds?: number[]) {
+    if (esRef.current) esRef.current.close();
+    setReJob({ active: true, done: false, messages: [], progress: 0 });
+
+    const body = scope === "category" ? { scope, categoryIds } : { scope };
+    const res = await apiFetch("/api/transactions/recategorize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const { jobId } = (await res.json()) as { jobId: string };
+    jobIdRef.current = jobId;
+
+    const es = new EventSource(sseUrl(`/api/transactions/recategorize/${jobId}/events`));
+    esRef.current = es;
+
+    es.onmessage = (e) => {
+      const event = JSON.parse(e.data as string) as Record<string, unknown>;
+
+      if (event.type === "needs_review") { setReview(event.groups as ReviewGroup[]); return; }
+      if (event.type === "review_applied") { setReview(null); }
+
+      setReJob((prev) => {
+        if (!prev) return prev;
+        const msgs = [...prev.messages];
+        if (event.type === "start") {
+          msgs.push({ text: `Začetek: ${event.total as number} transakcij`, type: "info" });
+          return { ...prev, messages: msgs, progress: 3, status: "Preverjanje pravil..." };
+        }
+        if (event.type === "rules_progress") {
+          const scanned = event.scanned as number; const tot = event.total as number;
+          return { ...prev, progress: tot > 0 ? 3 + Math.round((scanned / tot) * 27) : 3, status: `Preverjanje pravil: ${scanned} / ${tot}` };
+        }
+        if (event.type === "rules_applied") {
+          msgs.push({ text: `Pravila: ${event.count as number} posodobljenih, ${event.remaining as number} za AI`, type: "info" });
+          return { ...prev, messages: msgs, progress: 30, status: undefined };
+        }
+        if (event.type === "gemini_start") {
+          msgs.push({ text: `AI analiza s spletnim iskanjem: ${event.totalUnique as number} edinstvenih opisov`, type: "info" });
+          return { ...prev, messages: msgs, progress: 35, status: `AI: 0 / ${event.totalUnique as number} opisov` };
+        }
+        if (event.type === "review_applied") {
+          msgs.push({ text: `Pregled: ${event.categoriesCreated as number} novih kategorij, ${event.transactionsAssigned as number} transakcij razvrščenih`, type: "success" });
+          return { ...prev, messages: msgs };
+        }
+        if (event.type === "gemini_batch_start") {
+          const processed = event.processed as number; const totalUnique = event.totalUnique as number;
+          return { ...prev, status: `AI analizira opise ${processed + 1}–${Math.min(processed + 20, totalUnique)} / ${totalUnique}...` };
+        }
+        if (event.type === "gemini_batch") {
+          const processed = event.processed as number; const totalUnique = event.totalUnique as number;
+          const pct = totalUnique > 0 ? 35 + Math.round((processed / totalUnique) * 60) : 35;
+          const proposalsTxt = (event.proposals as number) > 0 ? ` · ${event.proposals as number} predlogov` : "";
+          return { ...prev, progress: pct, status: `AI: ${processed} / ${totalUnique} opisov · ${event.geminiApplied as number} razvrščenih${proposalsTxt}` };
+        }
+        if (event.type === "done") {
+          es.close();
+          void load();
+          msgs.push({ text: `Zaključeno: ${event.rulesApplied as number} s pravili + ${event.geminiApplied as number} z AI`, type: "success" });
+          return { ...prev, messages: msgs, progress: 100, done: true, active: false, status: undefined };
+        }
+        if (event.type === "error") {
+          es.close();
+          msgs.push({ text: event.message as string, type: "error" });
+          return { ...prev, messages: msgs, done: true, active: false, status: undefined };
+        }
+        return prev;
+      });
+    };
+    es.onerror = () => { es.close(); setReJob((prev) => prev ? { ...prev, active: false, done: true } : prev); };
+  }
+
   return (
-    <section className="rounded-xl border border-white/5 bg-white/2 p-5">
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-base font-medium text-slate-200">Kategorije</h2>
-        <Button
-          variant="full"
-          color="green"
-          onClick={openAdd}
-          iconLeft={<Plus size={14} />}
-        >
-          Dodaj
-        </Button>
-      </div>
+    <section className="rounded-xl border border-white/5 bg-white/2 p-5 space-y-4">
+      <CategoryReviewModal
+        open={review !== null}
+        groups={review ?? []}
+        categories={categories}
+        onSubmit={(d) => void submitReview(d)}
+        submitting={reviewSubmitting}
+      />
 
       {/* Add modal */}
-      <Modal
-        open={adding}
-        onClose={closeAdd}
-        title="Nova kategorija"
-        size="md"
-        footer={
-          <div className="flex gap-2">
-            <Button variant="full" color="green" onClick={handleAdd} disabled={saving}>
-              {saving ? "Shranjujem..." : "Shrani"}
-            </Button>
-            <Button variant="outline" color="default" onClick={closeAdd}>
-              Prekliči
-            </Button>
-          </div>
-        }
-      >
+      <Modal open={adding} onClose={closeAdd} title="Nova kategorija" size="md"
+        footer={<div className="flex gap-2">
+          <Button variant="full" color="green" onClick={handleAdd} disabled={saving}>{saving ? "Shranjujem..." : "Shrani"}</Button>
+          <Button variant="outline" color="default" onClick={closeAdd}>Prekliči</Button>
+        </div>}>
         <div className="space-y-4">
           {error && <p className="text-sm text-rose-400">{error}</p>}
-          <CategoryForm
-            name={newCat.name}
-            color={newCat.color}
-            type={newCat.type}
-            onChange={(f) => setNewCat((p) => ({ ...p, ...f }))}
-          />
+          <CategoryForm name={newCat.name} color={newCat.color} type={newCat.type} onChange={(f) => setNewCat((p) => ({ ...p, ...f }))} />
         </div>
       </Modal>
 
       {/* Edit modal */}
-      <Modal
-        open={editing !== null}
-        onClose={closeEdit}
-        title="Uredi kategorijo"
-        size="md"
-        footer={
-          <div className="flex gap-2">
-            <Button variant="full" color="green" onClick={handleUpdate} disabled={saving}>
-              {saving ? "Shranjujem..." : "Shrani"}
-            </Button>
-            <Button variant="outline" color="default" onClick={closeEdit}>
-              Prekliči
-            </Button>
-          </div>
-        }
-      >
+      <Modal open={editing !== null} onClose={closeEdit} title="Uredi kategorijo" size="md"
+        footer={<div className="flex gap-2">
+          <Button variant="full" color="green" onClick={handleUpdate} disabled={saving}>{saving ? "Shranjujem..." : "Shrani"}</Button>
+          <Button variant="outline" color="default" onClick={closeEdit}>Prekliči</Button>
+        </div>}>
         <div className="space-y-4">
           {error && <p className="text-sm text-rose-400">{error}</p>}
-          {editing && (
-            <CategoryForm
-              name={editing.name}
-              color={editing.color}
-              type={editing.type}
-              onChange={(f) => setEditing((p) => p ? { ...p, ...f } : p)}
-            />
-          )}
+          {editing && <CategoryForm name={editing.name} color={editing.color} type={editing.type} onChange={(f) => setEditing((p) => p ? { ...p, ...f } : p)} />}
         </div>
       </Modal>
 
-      {/* List */}
+      {/* Header */}
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h2 className="text-base font-medium text-slate-200">Kategorije</h2>
+          <p className="text-xs text-slate-500 mt-0.5">Upravljanje kategorij in razporejanje transakcij.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          {selected.size > 0 ? (
+            <Button variant="full" color="default" size="sm" disabled={reJob?.active}
+              onClick={() => void startRecategorize("category", [...selected])}
+              iconLeft={<RefreshCw size={13} />}>
+              Rekategoriziraj izbrane ({selected.size})
+            </Button>
+          ) : (
+            <Button variant="outline" color="default" size="sm" disabled={reJob?.active}
+              onClick={() => void startRecategorize("all")}
+              iconLeft={<RefreshCw size={13} />}>
+              Rekategoriziraj vse
+            </Button>
+          )}
+          <Button variant="full" color="green" size="sm" onClick={openAdd} iconLeft={<Plus size={13} />}>Dodaj</Button>
+        </div>
+      </div>
+
+      {/* Progress UI */}
+      {reJob && (
+        <div className="space-y-3 rounded-lg bg-white/3 p-3">
+          {reJob.active && (
+            <div className="flex items-center gap-2 text-sm text-slate-300">
+              <Loader2 size={14} className="animate-spin text-emerald-400" />
+              <span className="truncate">{reJob.status ?? "Obdelava..."}</span>
+              <span className="ml-auto shrink-0 text-emerald-400 font-medium tabular-nums">{reJob.progress}%</span>
+            </div>
+          )}
+          <div className="h-1.5 overflow-hidden rounded-full bg-slate-800">
+            <div className="h-full bg-gradient-to-r from-emerald-600 to-emerald-400 transition-all duration-300" style={{ width: `${reJob.progress}%` }} />
+          </div>
+          <div className="space-y-1 max-h-32 overflow-y-auto">
+            {reJob.messages.map((m, i) => (
+              <div key={i} className={`flex items-start gap-2 text-xs ${m.type === "success" ? "text-emerald-400" : m.type === "error" ? "text-rose-400" : "text-slate-400"}`}>
+                {m.type === "success" && <CheckCircle2 size={12} className="shrink-0 mt-0.5" />}
+                {m.type === "error" && <AlertCircle size={12} className="shrink-0 mt-0.5" />}
+                {m.type === "info" && <span className="shrink-0 mt-0.5 text-slate-500">›</span>}
+                <span>{m.text}</span>
+              </div>
+            ))}
+          </div>
+          {reJob.done && (
+            <Button variant="transparent" color="default" size="sm" onClick={() => setReJob(null)}>Zapri poročilo</Button>
+          )}
+        </div>
+      )}
+
+      {/* Category list */}
       {loading ? (
         <SkeletonRows count={6} />
       ) : (
-        <div className="space-y-1.5">
+        <div className="space-y-1">
+          {/* Select-all header row */}
+          <div className="flex items-center gap-3 px-3 py-1.5">
+            <Checkbox
+              checked={allSelected}
+              onChange={toggleAll}
+            />
+            <span className="text-xs text-slate-500 select-none">
+              {selected.size > 0 ? `${selected.size} izbranih` : "Izberi vse"}
+            </span>
+          </div>
           {categories.map((c) => (
             <div key={c.id} className="flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-white/3 group transition-colors">
+              <Checkbox checked={selected.has(c.id)} onChange={() => toggleOne(c.id)} />
               <span className="h-3 w-3 rounded-full shrink-0" style={{ background: c.color }} />
               <span className="flex-1 text-sm text-slate-200">{c.name}</span>
               <span className={`text-xs px-2 py-0.5 rounded-full ${
-                c.type === "income"
-                  ? "bg-emerald-500/15 text-emerald-300"
-                  : c.type === "expense"
-                    ? "bg-rose-500/15 text-rose-300"
-                    : "bg-indigo-500/15 text-indigo-300"
+                c.type === "income" ? "bg-emerald-500/15 text-emerald-300"
+                  : c.type === "expense" ? "bg-rose-500/15 text-rose-300"
+                  : "bg-indigo-500/15 text-indigo-300"
               }`}>
                 {c.type === "income" ? "prihodek" : c.type === "expense" ? "odhodek" : "oboje"}
               </span>
               <span className="text-xs text-slate-500">{c.transaction_count} txn</span>
               <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                <Button iconOnly variant="transparent" color="default" title="Rekategoriziraj"
+                  disabled={reJob?.active}
+                  onClick={() => void startRecategorize("category", [c.id])}>
+                  <RefreshCw size={13} />
+                </Button>
                 <Button iconOnly variant="transparent" color="default" onClick={() => openEdit(c)}>
                   <Edit2 size={13} />
                 </Button>
@@ -431,8 +557,33 @@ function UploadSection() {
   const [dragOver, setDragOver] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [job, setJob] = useState<UploadJob | null>(null);
+  const [review, setReview] = useState<ReviewGroup[] | null>(null);
+  const [reviewSubmitting, setReviewSubmitting] = useState(false);
+  const [categories, setCategories] = useState<ReviewCategory[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const esRef = useRef<EventSource | null>(null);
+  const jobIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    apiFetch("/api/categories").then((r) => r.json()).then((d) => setCategories(d as ReviewCategory[])).catch(() => {});
+  }, []);
+
+  async function submitReview(decisions: ReviewDecision[]) {
+    if (!jobIdRef.current) return;
+    setReviewSubmitting(true);
+    try {
+      await apiFetch(`/api/categorization/jobs/${jobIdRef.current}/review`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decisions }),
+      });
+      setReview(null);
+      // Refresh categories so any newly created ones are available next time.
+      apiFetch("/api/categories").then((r) => r.json()).then((d) => setCategories(d as ReviewCategory[])).catch(() => {});
+    } finally {
+      setReviewSubmitting(false);
+    }
+  }
 
   function handleFiles(files: File[]) {
     const pdfs = files.filter((f) => f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf"));
@@ -456,6 +607,7 @@ function UploadSection() {
 
     const res = await apiFetch("/api/files/upload", { method: "POST", body: form });
     const { jobId } = (await res.json()) as { jobId: string };
+    jobIdRef.current = jobId;
 
     if (esRef.current) esRef.current.close();
     const es = new EventSource(sseUrl(`/api/files/jobs/${jobId}/events`));
@@ -463,6 +615,16 @@ function UploadSection() {
 
     es.onmessage = (e) => {
       const event = JSON.parse(e.data as string) as Record<string, unknown>;
+
+      // New-category review prompt — handled outside the per-file progress state.
+      if (event.type === "needs_review") {
+        setReview(event.groups as ReviewGroup[]);
+        return;
+      }
+      if (event.type === "review_applied") {
+        setReview(null);
+        return;
+      }
 
       setJob((prev) => {
         if (!prev) return prev;
@@ -541,6 +703,13 @@ function UploadSection() {
 
   return (
     <section className="rounded-xl border border-white/5 bg-white/2 p-5 space-y-4">
+      <CategoryReviewModal
+        open={review !== null}
+        groups={review ?? []}
+        categories={categories}
+        onSubmit={(d) => void submitReview(d)}
+        submitting={reviewSubmitting}
+      />
       <h2 className="text-base font-medium text-slate-200">Nalaganje bančnih izpiskov</h2>
 
       {/* Drop zone */}
@@ -965,11 +1134,6 @@ function HistorySection() {
 
 // ─── Rules Section ─────────────────────────────────────────────────────────────
 
-interface RuleCondition {
-  pattern: string;
-  op?: "AND" | "OR";
-}
-
 interface Rule {
   id: number;
   pattern: string;
@@ -1156,196 +1320,6 @@ function BulkCategoryModal({
   );
 }
 
-function ModalRuleTransactions({ conditions }: { conditions: RuleCondition[] }) {
-  const [txns, setTxns] = useState<RuleTxn[] | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  // Include ops so AND↔OR changes trigger a refresh
-  const patternsKey = conditions
-    .map((c) => `${c.op ?? "FIRST"}:${c.pattern.trim()}`)
-    .filter((s) => s.split(":")[1])
-    .join("|");
-
-  useEffect(() => {
-    const filled = conditions.filter((c) => c.pattern.trim());
-    if (filled.length === 0) { setTxns(null); return; }
-
-    setLoading(true);
-    const timer = setTimeout(() => {
-      const uniquePatterns = [...new Set(filled.map((c) => c.pattern.trim()))];
-
-      void Promise.all(
-        uniquePatterns.map((p) =>
-          apiFetch(`/api/transactions?search=${encodeURIComponent(p)}&limit=500&word=1`)
-            .then((r) => r.json())
-            .then((d: { transactions: RuleTxn[] }) => ({ pattern: p, txns: d.transactions }))
-            .catch(() => ({ pattern: p, txns: [] as RuleTxn[] }))
-        )
-      ).then((results) => {
-        const byPattern = new Map<string, Set<number>>(
-          results.map(({ pattern, txns }) => [pattern, new Set(txns.map((t) => t.id))])
-        );
-        const allById = new Map<number, RuleTxn>(
-          results.flatMap(({ txns }) => txns).map((t) => [t.id, t])
-        );
-
-        // Walk conditions applying AND (intersect) / OR (union)
-        let resultIds = byPattern.get(filled[0].pattern.trim()) ?? new Set<number>();
-        for (let i = 1; i < filled.length; i++) {
-          const cond = filled[i];
-          const condIds = byPattern.get(cond.pattern.trim()) ?? new Set<number>();
-          if (cond.op === "OR") {
-            condIds.forEach((id) => resultIds.add(id));
-          } else {
-            // AND — keep only IDs present in both sets
-            resultIds = new Set([...resultIds].filter((id) => condIds.has(id)));
-          }
-        }
-
-        const merged = [...resultIds]
-          .map((id) => allById.get(id)!)
-          .filter(Boolean)
-          .sort((a, b) => b.date.localeCompare(a.date));
-
-        setTxns(merged);
-        setLoading(false);
-      });
-    }, 400);
-
-    return () => { clearTimeout(timer); setLoading(false); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [patternsKey]);
-
-  return (
-    <div className="rounded-lg border border-white/5 bg-white/2 overflow-hidden">
-      <p className="px-3 py-2 text-xs font-medium text-slate-500 border-b border-white/5">
-        Ujemajoče transakcije
-        {txns && txns.length > 0 && (
-          <span className="ml-1 text-slate-600">({txns.length})</span>
-        )}
-      </p>
-      {loading ? (
-        <div className="flex items-center gap-2 px-3 py-3 text-xs text-slate-500">
-          <Loader2 size={11} className="animate-spin text-slate-400 shrink-0" />
-          Nalaganje...
-        </div>
-      ) : !txns || txns.length === 0 ? (
-        <p className="px-3 py-3 text-xs text-slate-500">
-          {!txns ? "Vpišite vzorec za iskanje transakcij." : "Ni ujemajočih transakcij."}
-        </p>
-      ) : (
-        <div>
-          <table className="w-full text-xs">
-            <thead className="sticky top-0 bg-[#0b1e32]">
-              <tr className="text-left border-b border-white/5">
-                <th className="px-3 py-1.5 font-medium text-slate-600 whitespace-nowrap">Datum</th>
-                <th className="px-3 py-1.5 font-medium text-slate-600 whitespace-nowrap">Prejemnik</th>
-                <th className="px-3 py-1.5 font-medium text-slate-600 w-full">Opis</th>
-                <th className="px-3 py-1.5 font-medium text-slate-600 text-right whitespace-nowrap">Znesek</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-white/3">
-              {txns.map((t) => (
-                <tr key={t.id} className="hover:bg-white/2 transition-colors">
-                  <td className="px-3 py-1.5 text-slate-500 tabular-nums whitespace-nowrap">{fmtDate(t.date)}</td>
-                  <td className="px-3 py-1.5 text-slate-400 whitespace-nowrap max-w-[120px]">
-                    <span className="block truncate">{t.prejemnik || "—"}</span>
-                  </td>
-                  <td className="px-3 py-1.5 text-slate-400 max-w-[200px]">
-                    <span className="block truncate">{t.description}</span>
-                  </td>
-                  <td className={`px-3 py-1.5 tabular-nums text-right whitespace-nowrap font-medium ${t.type === "income" ? "text-emerald-400" : "text-rose-400"}`}>
-                    {t.type === "expense" ? "−" : "+"}{fmtAmt(t.amount)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function parseRuleConditions(rule: Rule): RuleCondition[] {
-  if (!rule.conditions) return [{ pattern: rule.pattern }];
-  try {
-    const parsed = JSON.parse(rule.conditions) as RuleCondition[];
-    return Array.isArray(parsed) && parsed.length > 0 ? parsed : [{ pattern: rule.pattern }];
-  } catch {
-    return [{ pattern: rule.pattern }];
-  }
-}
-
-function formatConditionsLabel(conditions: RuleCondition[]): string {
-  return conditions
-    .map((c, i) => (i === 0 ? c.pattern : `${c.op ?? "AND"} ${c.pattern}`))
-    .join("  ");
-}
-
-function ConditionsBuilder({
-  conditions,
-  onChange,
-}: {
-  conditions: RuleCondition[];
-  onChange: (c: RuleCondition[]) => void;
-}) {
-  return (
-    <div className="space-y-1.5">
-      {conditions.map((c, i) => (
-        <div key={i} className="flex items-center gap-1.5">
-          {i > 0 && (
-            <Combobox
-              value={c.op ?? "AND"}
-              onChange={(val) => {
-                const updated = [...conditions];
-                updated[i] = { ...c, op: val as "AND" | "OR" };
-                onChange(updated);
-              }}
-              options={[
-                { value: "AND", label: "IN" },
-                { value: "OR", label: "ALI" },
-              ]}
-              searchable={false}
-              size="sm"
-              className="w-20 shrink-0"
-            />
-          )}
-          <Input
-            value={c.pattern}
-            onChange={(e) => {
-              const updated = [...conditions];
-              updated[i] = { ...c, pattern: e.target.value };
-              onChange(updated);
-            }}
-            placeholder="Besedilo / vzorec…"
-            mono
-            className="flex-1"
-          />
-          {conditions.length > 1 && (
-            <Button
-              iconOnly
-              variant="transparent"
-              color="red"
-              onClick={() => onChange(conditions.filter((_, j) => j !== i))}
-            >
-              <X size={12} />
-            </Button>
-          )}
-        </div>
-      ))}
-      <Button
-        variant="full"
-        color="default"
-        size="sm"
-        onClick={() => onChange([...conditions, { pattern: "", op: "AND" }])}
-        iconLeft={<Plus size={11} />}
-      >
-        Dodaj pogoj
-      </Button>
-    </div>
-  );
-}
 
 function RulesSection() {
   const [rules, setRules] = useState<Rule[]>([]);
@@ -1467,7 +1441,12 @@ function RulesSection() {
   async function handleBulkDelete() {
     if (!confirm(`Izbrisati ${selectedIds.size} pravil?`)) return;
     setBulkDeleting(true);
-    await Promise.all([...selectedIds].map((id) => apiFetch(`/api/rules/${id}`, { method: "DELETE" })));
+    const ids = [...selectedIds];
+    await apiFetch("/api/rules/bulk-delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    });
     setSelectedIds(new Set());
     setBulkDeleting(false);
     await load();
@@ -1533,7 +1512,7 @@ function RulesSection() {
               className="flex-1"
             />
           </div>
-          <ModalRuleTransactions conditions={newConditions} />
+          <RuleMatchPreview conditions={newConditions} />
         </div>
       </Modal>
 
@@ -1575,7 +1554,7 @@ function RulesSection() {
               className="flex-1"
             />
           </div>
-          <ModalRuleTransactions conditions={editConditions} />
+          <RuleMatchPreview conditions={editConditions} />
         </div>
       </Modal>
 
@@ -1736,142 +1715,6 @@ function RulesSection() {
           </div>
       </section>
     </>
-  );
-}
-
-// ─── Recategorize Section ──────────────────────────────────────────────────────
-
-interface ReJob {
-  active: boolean;
-  done: boolean;
-  messages: Array<{ text: string; type: "info" | "success" | "error" }>;
-  progress: number;
-}
-
-function RecategorizeSection() {
-  const [job, setJob] = useState<ReJob | null>(null);
-  const esRef = useRef<EventSource | null>(null);
-
-  async function start(scope: "all" | "uncategorized") {
-    if (esRef.current) esRef.current.close();
-    setJob({ active: true, done: false, messages: [], progress: 0 });
-
-    const res = await apiFetch("/api/transactions/recategorize", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ scope }),
-    });
-    const { jobId } = (await res.json()) as { jobId: string };
-
-    const es = new EventSource(sseUrl(`/api/transactions/recategorize/${jobId}/events`));
-    esRef.current = es;
-
-    es.onmessage = (e) => {
-      const event = JSON.parse(e.data as string) as Record<string, unknown>;
-
-      setJob((prev) => {
-        if (!prev) return prev;
-        const msgs = [...prev.messages];
-
-        if (event.type === "start") {
-          msgs.push({ text: `Začetek: ${event.total as number} transakcij`, type: "info" });
-          return { ...prev, messages: msgs, progress: 5 };
-        }
-        if (event.type === "rules_applied") {
-          msgs.push({ text: `Pravila: ${event.count as number} posodobljenih, ${event.remaining as number} za AI`, type: "info" });
-          return { ...prev, messages: msgs, progress: 30 };
-        }
-        if (event.type === "gemini_start") {
-          msgs.push({ text: `AI analiza: ${event.totalBatches as number} ${(event.totalBatches as number) === 1 ? "serija" : "serij"} po 100`, type: "info" });
-          return { ...prev, messages: msgs, progress: 35 };
-        }
-        if (event.type === "gemini_batch") {
-          const pct = 35 + Math.round(((event.batchIndex as number) / (event.totalBatches as number)) * 60);
-          return { ...prev, progress: pct };
-        }
-        if (event.type === "done") {
-          es.close();
-          msgs.push({ text: `Zaključeno: ${event.rulesApplied as number} s pravili + ${event.geminiApplied as number} z AI`, type: "success" });
-          return { ...prev, messages: msgs, progress: 100, done: true, active: false };
-        }
-        if (event.type === "error") {
-          es.close();
-          msgs.push({ text: event.message as string, type: "error" });
-          return { ...prev, messages: msgs, done: true, active: false };
-        }
-        return prev;
-      });
-    };
-
-    es.onerror = () => { es.close(); setJob((prev) => prev ? { ...prev, active: false, done: true } : prev); };
-  }
-
-  return (
-    <section className="rounded-xl border border-white/5 bg-white/2 p-5 space-y-4">
-      <div>
-        <h2 className="text-base font-medium text-slate-200">Ponovna kategorizacija</h2>
-        <p className="text-xs text-slate-500 mt-1">
-          Ponovno razporedi transakcije v kategorije — najprej pravila, nato AI za preostale.
-        </p>
-      </div>
-
-      {(!job || job.done) && (
-        <div className="flex flex-wrap gap-3">
-          <Button
-            variant="full"
-            color="green"
-            onClick={() => void start("all")}
-            iconLeft={<RefreshCw size={14}/>}
-          >
-            Vse transakcije
-          </Button>
-          <Button
-            variant="full"
-            color="default"
-            onClick={() => void start("uncategorized")}
-            iconLeft={<RefreshCw size={14}/>}
-          >
-            Samo nekategorizirane
-          </Button>
-        </div>
-      )}
-
-      {job && (
-        <div className="space-y-3">
-          {job.active && (
-            <div className="flex items-center gap-2 text-sm text-slate-300">
-              <Loader2 size={14} className="animate-spin text-emerald-400"/>
-              <span>Obdelava...</span>
-              <span className="ml-auto text-emerald-400 font-medium">{job.progress}%</span>
-            </div>
-          )}
-          <div className="h-1.5 overflow-hidden rounded-full bg-slate-800">
-            <div className="h-full bg-gradient-to-r from-emerald-600 to-emerald-400 transition-all duration-500"
-              style={{ width: `${job.progress}%` }}/>
-          </div>
-          <div className="space-y-1 max-h-36 overflow-y-auto">
-            {job.messages.map((m, i) => (
-              <div key={i} className={`flex items-start gap-2 text-xs ${m.type === "success" ? "text-emerald-400" : m.type === "error" ? "text-rose-400" : "text-slate-400"}`}>
-                {m.type === "success" && <CheckCircle2 size={12} className="shrink-0 mt-0.5"/>}
-                {m.type === "error" && <AlertCircle size={12} className="shrink-0 mt-0.5"/>}
-                {m.type === "info" && <span className="shrink-0 mt-0.5 text-slate-500">›</span>}
-                <span>{m.text}</span>
-              </div>
-            ))}
-          </div>
-          {job.done && (
-            <Button
-              variant="transparent"
-              color="default"
-              size="sm"
-              onClick={() => setJob(null)}
-            >
-              Zapri poročilo
-            </Button>
-          )}
-        </div>
-      )}
-    </section>
   );
 }
 

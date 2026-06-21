@@ -149,6 +149,19 @@ rulesRouter.delete("/:id", (req, res) => {
   res.status(204).end();
 });
 
+const bulkDeleteSchema = z.object({
+  ids: z.array(z.number().int().positive()).min(1),
+});
+
+rulesRouter.post("/bulk-delete", (req, res) => {
+  const parsed = bulkDeleteSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
+  const { ids } = parsed.data;
+  const placeholders = ids.map(() => "?").join(", ");
+  const info = sqlite.prepare(`DELETE FROM category_rules WHERE id IN (${placeholders})`).run(...ids);
+  res.json({ deleted: info.changes });
+});
+
 const bulkSchema = z.object({
   rule_ids: z.array(z.number().int().positive()).min(1),
   category_id: z.number().int().positive(),

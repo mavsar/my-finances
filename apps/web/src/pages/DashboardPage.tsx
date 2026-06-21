@@ -5,6 +5,7 @@ import { Button } from "../components/Button";
 import { Checkbox } from "../components/Checkbox";
 import { Combobox } from "../components/Combobox";
 import { Input } from "../components/Input";
+import { RuleEditorModal, type RuleCondition } from "../components/RuleEditorModal";
 import {
   Bar, BarChart, CartesianGrid, Cell, Legend,
   Pie, PieChart, ResponsiveContainer, Sector, Tooltip, XAxis, YAxis,
@@ -12,7 +13,7 @@ import {
 import type { SectorProps } from "recharts";
 import {
   ArrowDownCircle, ArrowUpCircle, CheckCircle2, ChevronDown,
-  ChevronUp, Loader2, Search, TrendingDown, TrendingUp, Wallet,
+  ChevronUp, Loader2, Plus, Search, TrendingDown, TrendingUp, Wallet,
 } from "lucide-react";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -317,8 +318,7 @@ function TransactionList({ from, to, categoryId, onCategoryChange }: { from?: st
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
-  const [bulkCatId, setBulkCatId] = useState<number | null>(null);
-  const [bulkLoading, setBulkLoading] = useState(false);
+  const [ruleModal, setRuleModal] = useState<{ conditions: RuleCondition[]; categoryId: number } | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevKey = useRef("");
 
@@ -386,30 +386,27 @@ function TransactionList({ from, to, categoryId, onCategoryChange }: { from?: st
     onCategoryChange?.();
   }
 
-  async function handleBulkCategoryChange() {
-    if (bulkCatId === null || selectedIds.size === 0) return;
-    setBulkLoading(true);
-    try {
-      await Promise.all([...selectedIds].map((id) =>
-        apiFetch(`/api/transactions/${id}/category`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ category_id: bulkCatId, create_rule: false }),
-        })
-      ));
-      const cat = categories.find((c) => c.id === bulkCatId);
-      setTransactions((prev) =>
-        prev.map((t) => selectedIds.has(t.id)
-          ? { ...t, category_id: bulkCatId, category_name: cat?.name ?? null, category_color: cat?.color ?? null, is_manual: 1 }
-          : t
-        )
-      );
-      setSelectedIds(new Set());
-      setBulkCatId(null);
-      onCategoryChange?.();
-    } finally {
-      setBulkLoading(false);
-    }
+  // Selecting transactions doesn't just set their category — it opens the rule
+  // editor (same modal as the Rules page) so the choice becomes a rule that also
+  // catches every other matching transaction. Conditions are pre-filled from the
+  // selection (one OR-condition per distinct payee/description).
+  function openRuleFromSelection() {
+    const selectedTxns = transactions.filter((t) => selectedIds.has(t.id));
+    if (selectedTxns.length === 0) return;
+
+    const distinct = [
+      ...new Set(selectedTxns.map((t) => (t.prejemnik?.trim() || t.description.trim()))),
+    ].filter(Boolean);
+
+    const conditions: RuleCondition[] =
+      distinct.length > 0
+        ? distinct.map((p, i) => (i === 0 ? { pattern: p } : { pattern: p, op: "OR" as const }))
+        : [{ pattern: "" }];
+
+    const catIds = new Set(selectedTxns.map((t) => t.category_id));
+    const categoryId = catIds.size === 1 ? ([...catIds][0] ?? 0) : 0;
+
+    setRuleModal({ conditions, categoryId });
   }
 
   const allSelected = transactions.length > 0 && transactions.every((t) => selectedIds.has(t.id));
@@ -464,44 +461,42 @@ function TransactionList({ from, to, categoryId, onCategoryChange }: { from?: st
       {open && someSelected && (
         <div className="flex items-center gap-3 px-5 py-2.5 border-t border-white/5 bg-indigo-500/5">
           <span className="text-xs text-indigo-300 font-medium shrink-0">{selectedIds.size} izbranih</span>
-          <Combobox
-            variant="indigo"
-            size="sm"
-            value={bulkCatId}
-            onChange={(val) => setBulkCatId(val as number | null)}
-            options={(() => {
-              const selectedTxns = transactions.filter((t) => selectedIds.has(t.id));
-              const types = new Set(selectedTxns.map((t) => t.type));
-              const sharedType = types.size === 1 ? [...types][0] : null;
-              return (sharedType ? categories.filter((c) => c.type === sharedType || c.type === "both") : categories)
-                .map((c) => ({ value: c.id, label: c.name, color: c.color }));
-            })()}
-            nullable
-            nullLabel="— izberi kategorijo —"
-            className="flex-1 max-w-xs"
-          />
           <Button
             variant="full"
             color="default"
             size="sm"
-            onClick={() => void handleBulkCategoryChange()}
-            disabled={bulkCatId === null || bulkLoading}
-            className="bg-indigo-500/20 text-indigo-300 hover:bg-indigo-500/30 disabled:opacity-40"
-            iconLeft={bulkLoading ? <Loader2 size={11} className="animate-spin shrink-0"/> : undefined}
+            onClick={openRuleFromSelection}
+            className="bg-indigo-500/20 text-indigo-300 hover:bg-indigo-500/30"
+            iconLeft={<Plus size={11} className="shrink-0"/>}
           >
-            Nastavi
+            Ustvari pravilo iz izbire
           </Button>
           <Button
             variant="transparent"
             color="default"
             size="sm"
-            onClick={() => { setSelectedIds(new Set()); setBulkCatId(null); }}
-            className="text-slate-500 hover:text-slate-300 px-0 py-0"
+            onClick={() => setSelectedIds(new Set())}
+            className="ml-auto text-slate-500 hover:text-slate-300 px-0 py-0"
           >
             Prekliči
           </Button>
         </div>
       )}
+
+      <RuleEditorModal
+        open={ruleModal !== null}
+        onClose={() => setRuleModal(null)}
+        categories={categories}
+        initialConditions={ruleModal?.conditions}
+        initialCategoryId={ruleModal?.categoryId}
+        title="Novo pravilo iz izbire"
+        saveLabel="Ustvari pravilo"
+        onSaved={() => {
+          setSelectedIds(new Set());
+          void load(0, false);
+          onCategoryChange?.();
+        }}
+      />
 
       {open && (
         <div>
@@ -631,7 +626,29 @@ function CategoryBreakdown({ byCategory, loading, selectedCategoryId, onSelectCa
   onSelectCategory: (id: number | null) => void;
 }) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const [typeFilter, setTypeFilter] = useState<"all" | "income" | "expense">("all");
   const listRef = useRef<HTMLDivElement>(null);
+
+  // Derive filtered rows and recompute totals/percentages for the active filter.
+  const filtered = useMemo(() => {
+    const rows = byCategory.map((c) => {
+      const total =
+        typeFilter === "income"  ? c.income_total  :
+        typeFilter === "expense" ? c.expense_total :
+        c.income_total + c.expense_total;
+      return { ...c, total };
+    }).filter((c) => c.total > 0);
+
+    const grand = rows.reduce((s, r) => s + r.total, 0);
+    return rows.map((r) => ({ ...r, percentage: grand > 0 ? Math.round((r.total / grand) * 100) : 0 }));
+  }, [byCategory, typeFilter]);
+
+  // Clear category selection when the type filter makes the selected row invisible.
+  useEffect(() => {
+    if (selectedCategoryId !== null && !filtered.find((c) => c.id === selectedCategoryId)) {
+      onSelectCategory(null);
+    }
+  }, [filtered, selectedCategoryId, onSelectCategory]);
 
   // Scroll highlighted row into view when activated from the chart
   useEffect(() => {
@@ -643,15 +660,34 @@ function CategoryBreakdown({ byCategory, loading, selectedCategoryId, onSelectCa
   return (
     <div className="grid gap-5 md:grid-cols-2">
       <div className="rounded-xl border border-white/5 bg-white/2 p-5">
-        <h2 className="text-sm font-medium text-slate-300 mb-4">Kategorije</h2>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-sm font-medium text-slate-300">Kategorije</h2>
+          <div className="flex gap-1 rounded-lg bg-white/5 p-0.5">
+            {(["all", "income", "expense"] as const).map((f) => (
+              <button
+                key={f}
+                onClick={() => setTypeFilter(f)}
+                className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+                  typeFilter === f
+                    ? f === "income"  ? "bg-emerald-500/20 text-emerald-300"
+                    : f === "expense" ? "bg-rose-500/20 text-rose-300"
+                    : "bg-white/10 text-slate-200"
+                    : "text-slate-500 hover:text-slate-300"
+                }`}
+              >
+                {f === "all" ? "Vse" : f === "income" ? "Prihodki" : "Odhodki"}
+              </button>
+            ))}
+          </div>
+        </div>
         {loading ? (
           <ChartSkeleton height={600} round />
-        ) : byCategory.length > 0 ? (
+        ) : filtered.length > 0 ? (
           <>
             <ResponsiveContainer width="100%" height={600}>
               <PieChart>
                 <Pie
-                  data={byCategory} dataKey="total" nameKey="name"
+                  data={filtered} dataKey="total" nameKey="name"
                 cx="50%" cy="50%" innerRadius={130} outerRadius={240} paddingAngle={2}
                 activeIndex={activeIndex ?? undefined}
                 activeShape={(props: SectorProps) => (
@@ -660,17 +696,17 @@ function CategoryBreakdown({ byCategory, loading, selectedCategoryId, onSelectCa
                   onMouseEnter={(_, index) => setActiveIndex(index)}
                   onMouseLeave={() => setActiveIndex(null)}
                   onClick={(_, index) => {
-                    const cat = byCategory[index];
+                    const cat = filtered[index];
                     onSelectCategory(selectedCategoryId === cat.id ? null : cat.id);
                   }}
                   style={{ cursor: "pointer" }}
                 >
-                  {byCategory.map((c, i) => (
+                  {filtered.map((c, i) => (
                     <Cell
                       key={i} fill={c.color}
                       opacity={
                         selectedCategoryId !== null
-                          ? (byCategory[i].id === selectedCategoryId ? 1 : 0.2)
+                          ? (filtered[i].id === selectedCategoryId ? 1 : 0.2)
                           : (activeIndex === null || activeIndex === i ? 1 : 0.35)
                       }
                     />
@@ -679,10 +715,12 @@ function CategoryBreakdown({ byCategory, loading, selectedCategoryId, onSelectCa
                 <Tooltip content={<PieTooltip />} />
               </PieChart>
             </ResponsiveContainer>
-            <div className="flex items-center justify-center gap-4 text-xs text-slate-500 -mt-1">
-              <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-emerald-500 shrink-0"/>prihodki</span>
-              <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-rose-500 shrink-0"/>odhodki</span>
-            </div>
+            {typeFilter === "all" && (
+              <div className="flex items-center justify-center gap-4 text-xs text-slate-500 -mt-1">
+                <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-emerald-500 shrink-0"/>prihodki</span>
+                <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-rose-500 shrink-0"/>odhodki</span>
+              </div>
+            )}
           </>
         ) : (
           <p className="flex items-center justify-center h-[600px] text-sm text-slate-500">Ni podatkov.</p>
@@ -705,17 +743,17 @@ function CategoryBreakdown({ byCategory, loading, selectedCategoryId, onSelectCa
         </div>
         {loading ? (
           <SkeletonRows count={8} />
-        ) : byCategory.length > 0 ? (
+        ) : filtered.length > 0 ? (
           <>
             <div className="flex items-center gap-3 px-2 pb-1 mb-1 border-b border-white/5 pr-5">
               <span className="flex-1" />
               <span className="text-xs text-slate-500 w-8 text-right">%</span>
-              <span className="text-xs text-emerald-500/70 w-32 text-right">Prihodki</span>
-              <span className="text-xs text-rose-500/70 w-32 text-right">Odhodki</span>
+              {typeFilter !== "expense" && <span className="text-xs text-emerald-500/70 w-32 text-right">Prihodki</span>}
+              {typeFilter !== "income"  && <span className="text-xs text-rose-500/70 w-32 text-right">Odhodki</span>}
               <span className="text-xs text-slate-500 w-32 text-right">Skupaj</span>
             </div>
             <div ref={listRef} className="space-y-1 max-h-[600px] overflow-y-auto [scrollbar-gutter:stable]">
-            {byCategory.map((c, i) => (
+            {filtered.map((c, i) => (
               <div
                 key={c.id}
                 className="flex items-center gap-3 rounded-lg px-2 py-1.5 cursor-pointer transition-colors"
@@ -734,16 +772,24 @@ function CategoryBreakdown({ byCategory, loading, selectedCategoryId, onSelectCa
                   style={{ background: c.color, transform: activeIndex === i || selectedCategoryId === c.id ? "scale(1.35)" : "scale(1)" }} />
                 <span className={`flex-1 truncate text-sm transition-colors ${activeIndex === i || selectedCategoryId === c.id ? "text-slate-100" : "text-slate-300"}`}>{c.name}</span>
                 <span className="text-xs text-slate-500 w-8 text-right">{c.percentage}%</span>
-                <span className="text-xs font-medium tabular-nums text-emerald-400 w-32 text-right">
-                  {c.income_total > 0 ? `+ ${fmt(c.income_total)}` : ""}
-                </span>
-                <span className="text-xs font-medium tabular-nums text-rose-400 w-32 text-right">
-                  {c.expense_total > 0 ? `− ${fmt(c.expense_total)}` : ""}
-                </span>
+                {typeFilter !== "expense" && (
+                  <span className="text-xs font-medium tabular-nums text-emerald-400 w-32 text-right">
+                    {c.income_total > 0 ? `+ ${fmt(c.income_total)}` : ""}
+                  </span>
+                )}
+                {typeFilter !== "income" && (
+                  <span className="text-xs font-medium tabular-nums text-rose-400 w-32 text-right">
+                    {c.expense_total > 0 ? `− ${fmt(c.expense_total)}` : ""}
+                  </span>
+                )}
                 <span className={`text-sm font-semibold tabular-nums w-32 text-right transition-colors ${
+                  typeFilter === "income"  ? "text-emerald-400" :
+                  typeFilter === "expense" ? "text-rose-400" :
                   c.income_total > c.expense_total ? "text-emerald-400" : c.expense_total > c.income_total ? "text-rose-400" : "text-slate-200"
                 }`}>
-                  {c.income_total > c.expense_total ? "+" : c.expense_total > c.income_total ? "−" : ""}{fmt(Math.abs(c.income_total - c.expense_total))}
+                  {typeFilter === "income"  ? `+ ${fmt(c.total)}` :
+                   typeFilter === "expense" ? `− ${fmt(c.total)}` :
+                   `${c.income_total > c.expense_total ? "+" : c.expense_total > c.income_total ? "−" : ""}${fmt(Math.abs(c.income_total - c.expense_total))}`}
                 </span>
               </div>
             ))}

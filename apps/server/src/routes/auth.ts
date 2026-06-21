@@ -4,7 +4,11 @@ import jwt from "jsonwebtoken";
 export const authRouter = Router();
 
 authRouter.post("/login", (req, res) => {
-  const { username, password } = req.body as { username?: string; password?: string };
+  const { username, password, remember } = req.body as {
+    username?: string;
+    password?: string;
+    remember?: boolean;
+  };
 
   const expectedUsername = process.env.AUTH_USERNAME;
   const expectedPassword = process.env.AUTH_PASSWORD;
@@ -20,7 +24,10 @@ authRouter.post("/login", (req, res) => {
   }
 
   const secret = process.env.JWT_SECRET ?? "fallback-secret";
-  const token = jwt.sign({ username }, secret, { expiresIn: "7d" });
+  // "Remember me" → long-lived token stored persistently in the browser.
+  // No "Remember me" → short-lived token stored only for the session.
+  const expiresIn = remember ? "30d" : "12h";
+  const token = jwt.sign({ username }, secret, { expiresIn });
 
   res.json({ token });
 });

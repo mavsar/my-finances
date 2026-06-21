@@ -2,11 +2,13 @@ import { FormEvent, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { TrendingUp } from "lucide-react";
 import { setToken } from "../lib/api";
+import { Checkbox } from "../components/Checkbox";
 
 export function LoginPage() {
   const navigate = useNavigate();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [remember, setRemember] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -19,7 +21,7 @@ export function LoginPage() {
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ username, password, remember }),
       });
 
       if (!res.ok) {
@@ -29,7 +31,7 @@ export function LoginPage() {
       }
 
       const { token } = (await res.json()) as { token: string };
-      setToken(token);
+      setToken(token, remember);
       navigate("/", { replace: true });
     } catch {
       setError("Network error — is the server running?");
@@ -95,6 +97,19 @@ export function LoginPage() {
               {error}
             </p>
           )}
+
+          <div className="flex items-center gap-2">
+            <Checkbox
+              checked={remember}
+              onChange={setRemember}
+              variant="emerald"
+              size="md"
+              aria-label="Remember me"
+            />
+            <span className="text-sm text-slate-400 cursor-pointer select-none" onClick={() => setRemember((v) => !v)}>
+              Remember me
+            </span>
+          </div>
 
           <button
             type="submit"

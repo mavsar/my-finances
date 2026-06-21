@@ -9,6 +9,7 @@ import { sqlite } from "./db/client.js";
 import { requireAuth } from "./middleware/auth.js";
 import { authRouter } from "./routes/auth.js";
 import { categoriesRouter } from "./routes/categories.js";
+import { categorizationRouter } from "./routes/categorization.js";
 import { dashboardRouter } from "./routes/dashboard.js";
 import { filesRouter } from "./routes/files.js";
 import { healthRouter } from "./routes/health.js";
@@ -25,6 +26,7 @@ app.use("/api/health", healthRouter);
 app.use("/api/auth", authRouter);
 
 app.use("/api/categories", requireAuth, categoriesRouter);
+app.use("/api/categorization", requireAuth, categorizationRouter);
 app.use("/api/files", requireAuth, filesRouter);
 app.use("/api/dashboard", requireAuth, dashboardRouter);
 app.use("/api/transactions", requireAuth, transactionsRouter);
