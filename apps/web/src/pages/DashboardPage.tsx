@@ -5,7 +5,9 @@ import { Button } from "../components/Button";
 import { Checkbox } from "../components/Checkbox";
 import { Combobox } from "../components/Combobox";
 import { Input } from "../components/Input";
+import { Money, fmtMoney } from "../components/Money";
 import { RuleEditorModal, type RuleCondition } from "../components/RuleEditorModal";
+import { useBlur } from "../contexts/BlurContext";
 import {
   Bar, BarChart, CartesianGrid, Cell, Legend,
   Pie, PieChart, ResponsiveContainer, Sector, Tooltip, XAxis, YAxis,
@@ -38,9 +40,6 @@ const MONTH_LABELS: Record<string, string> = {
   "07": "Jul","08": "Avg","09": "Sep","10": "Okt","11": "Nov","12": "Dec",
 };
 
-function fmt(v: number) {
-  return new Intl.NumberFormat("sl-SI", { style: "currency", currency: "EUR" }).format(v);
-}
 function fmtDate(iso: string) {
   return new Intl.DateTimeFormat("sl-SI", { day: "2-digit", month: "2-digit", year: "numeric" }).format(new Date(iso));
 }
@@ -63,6 +62,7 @@ function toQS(params: Record<string, string | undefined>) {
 // ── Dashboard Page ─────────────────────────────────────────────────────────────
 
 export function DashboardPage() {
+  const { blurred } = useBlur();
   const [searchParams, setSearchParams] = useSearchParams();
   const [years, setYears] = useState<string[]>([]);
   const [summary, setSummary] = useState<Summary | null>(null);
@@ -244,7 +244,18 @@ export function DashboardPage() {
               <ChartSkeleton height={280} />
             ) : chartData.length > 0 ? (
               <ResponsiveContainer width="100%" height={280}>
-                <BarChart data={chartData} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+                <BarChart
+                  data={chartData}
+                  margin={{ top: 4, right: 4, left: 0, bottom: 0 }}
+                  style={{ cursor: "pointer" }}
+                  onClick={(data) => {
+                    const row = data?.activePayload?.[0]?.payload as (typeof chartData)[0] | undefined;
+                    if (!row) return;
+                    const [year, month] = row.month.split("-");
+                    const isActive = period.type === "year" && period.year === year && period.month === month;
+                    setPeriod(isActive ? { type: "year", year } : { type: "year", year, month });
+                  }}
+                >
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)"/>
                   <XAxis dataKey="label" tick={{ fill: "#94a3b8", fontSize: 11 }} axisLine={false} tickLine={false}/>
                   <YAxis tick={{ fill: "#94a3b8", fontSize: 11 }} axisLine={false} tickLine={false}
@@ -254,7 +265,7 @@ export function DashboardPage() {
                     contentStyle={{ background: "#1e293b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "8px", fontSize: 12 }}
                     labelStyle={{ color: "#cbd5e1" }}
                     itemStyle={{ color: "#f1f5f9" }}
-                    formatter={(value: number) => [fmt(value)]}/>
+                    formatter={(value: number) => [blurred ? "•••••" : fmtMoney(value)]}/>
                   <Legend wrapperStyle={{ fontSize: 12, color: "#94a3b8" }} formatter={(v) => v === "income" ? "Prihodki" : "Odhodki"}/>
                   <Bar dataKey="income" fill="#10b981" radius={[4,4,0,0]} maxBarSize={28} name="income">
                     {chartData.map((row, i) => {
@@ -298,7 +309,7 @@ function SummaryCard({ label, value, icon, colorClass, bgClass, loading }: {
         <p className="text-xs text-slate-400">{label}</p>
         <span className={`${colorClass} ${bgClass} rounded-md p-1`}>{icon}</span>
       </div>
-      <p className={`text-xl font-semibold tabular-nums ${colorClass}`}>{loading ? "…" : fmt(value)}</p>
+      <p className={`text-xl font-semibold tabular-nums ${colorClass}`}>{loading ? "…" : <Money value={value} />}</p>
     </div>
   );
 }
@@ -554,10 +565,10 @@ function TransactionList({ from, to, categoryId, onCategoryChange }: { from?: st
                       </div>
                     </td>
                     <td className={`px-4 py-2.5 font-medium tabular-nums text-right whitespace-nowrap ${t.type === "income" ? "text-emerald-400" : "text-rose-400"}`}>
-                      {t.type === "expense" ? "-" : "+"}{fmt(t.amount)}
+                      <Money value={t.amount} sign={t.type === "expense" ? "-" : "+"} />
                     </td>
                     <td className={`px-4 py-2.5 tabular-nums text-right whitespace-nowrap text-xs ${t.stanje == null ? "text-slate-600" : t.stanje >= 0 ? "text-slate-400" : "text-rose-400/70"}`}>
-                      {t.stanje == null ? "—" : fmt(t.stanje)}
+                      {t.stanje == null ? "—" : <Money value={t.stanje} />}
                     </td>
                   </tr>
                 ))}
@@ -608,10 +619,10 @@ function PieTooltip({ active, payload }: { active?: boolean; payload?: Array<{ p
       </div>
       <div className="flex flex-col gap-0.5 text-slate-400">
         {c.income_total > 0 && (
-          <span className="text-emerald-400">+ {fmt(c.income_total)}</span>
+          <span className="text-emerald-400"><Money value={c.income_total} sign="+ " /></span>
         )}
         {c.expense_total > 0 && (
-          <span className="text-rose-400">− {fmt(c.expense_total)}</span>
+          <span className="text-rose-400"><Money value={c.expense_total} sign="− " /></span>
         )}
         <span className="text-slate-500 text-[11px] pt-0.5">{c.percentage}% skupaj</span>
       </div>
@@ -774,12 +785,12 @@ function CategoryBreakdown({ byCategory, loading, selectedCategoryId, onSelectCa
                 <span className="text-xs text-slate-500 w-8 text-right">{c.percentage}%</span>
                 {typeFilter !== "expense" && (
                   <span className="text-xs font-medium tabular-nums text-emerald-400 w-32 text-right">
-                    {c.income_total > 0 ? `+ ${fmt(c.income_total)}` : ""}
+                    {c.income_total > 0 ? <Money value={c.income_total} sign="+ " /> : ""}
                   </span>
                 )}
                 {typeFilter !== "income" && (
                   <span className="text-xs font-medium tabular-nums text-rose-400 w-32 text-right">
-                    {c.expense_total > 0 ? `− ${fmt(c.expense_total)}` : ""}
+                    {c.expense_total > 0 ? <Money value={c.expense_total} sign="− " /> : ""}
                   </span>
                 )}
                 <span className={`text-sm font-semibold tabular-nums w-32 text-right transition-colors ${
@@ -787,9 +798,9 @@ function CategoryBreakdown({ byCategory, loading, selectedCategoryId, onSelectCa
                   typeFilter === "expense" ? "text-rose-400" :
                   c.income_total > c.expense_total ? "text-emerald-400" : c.expense_total > c.income_total ? "text-rose-400" : "text-slate-200"
                 }`}>
-                  {typeFilter === "income"  ? `+ ${fmt(c.total)}` :
-                   typeFilter === "expense" ? `− ${fmt(c.total)}` :
-                   `${c.income_total > c.expense_total ? "+" : c.expense_total > c.income_total ? "−" : ""}${fmt(Math.abs(c.income_total - c.expense_total))}`}
+                  {typeFilter === "income"  ? <Money value={c.total} sign="+ " /> :
+                   typeFilter === "expense" ? <Money value={c.total} sign="− " /> :
+                   <Money value={Math.abs(c.income_total - c.expense_total)} sign={c.income_total > c.expense_total ? "+" : c.expense_total > c.income_total ? "−" : ""} />}
                 </span>
               </div>
             ))}

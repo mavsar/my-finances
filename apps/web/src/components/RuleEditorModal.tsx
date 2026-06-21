@@ -5,6 +5,7 @@ import { Modal } from "./Modal";
 import { Button } from "./Button";
 import { Input } from "./Input";
 import { Combobox } from "./Combobox";
+import { Money } from "./Money";
 
 // ── Shared rule building blocks ───────────────────────────────────────────────
 //
@@ -35,10 +36,6 @@ interface RuleTxn {
 function fmtDate(iso: string) {
   return new Intl.DateTimeFormat("sl-SI", { day: "2-digit", month: "2-digit", year: "numeric" }).format(new Date(iso));
 }
-function fmtAmt(v: number) {
-  return new Intl.NumberFormat("sl-SI", { style: "currency", currency: "EUR" }).format(v);
-}
-
 export function parseRuleConditions(rule: { pattern: string; conditions: string | null }): RuleCondition[] {
   if (!rule.conditions) return [{ pattern: rule.pattern }];
   try {
@@ -221,7 +218,7 @@ export function RuleMatchPreview({ conditions }: { conditions: RuleCondition[] }
                     <span className="block truncate">{t.description}</span>
                   </td>
                   <td className={`px-3 py-1.5 tabular-nums text-right whitespace-nowrap font-medium ${t.type === "income" ? "text-emerald-400" : "text-rose-400"}`}>
-                    {t.type === "expense" ? "−" : "+"}{fmtAmt(t.amount)}
+                    <Money value={t.amount} sign={t.type === "expense" ? "−" : "+"} />
                   </td>
                 </tr>
               ))}

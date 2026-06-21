@@ -25,6 +25,7 @@ import { Combobox } from "../components/Combobox";
 import { Input } from "../components/Input";
 import { Modal } from "../components/Modal";
 import { CategoryReviewModal, type ReviewGroup, type ReviewCategory, type ReviewDecision } from "../components/CategoryReviewModal";
+import { Money } from "../components/Money";
 import {
   ConditionsBuilder,
   RuleMatchPreview,
@@ -882,15 +883,15 @@ function FileProgressRow({ file }: { file: FileProgress }) {
                 {amountChanged && (
                   <div className="flex items-center gap-1">
                     <span className="text-slate-500 w-14 shrink-0">Znesek:</span>
-                    <span className="font-mono text-slate-400 line-through">{fmtAmt(c.prevAmount)} €</span>
+                    <span className="font-mono text-slate-400 line-through"><Money value={c.prevAmount} /></span>
                     <span className="text-slate-500 mx-1">→</span>
-                    <span className="font-mono text-orange-300 font-medium">{fmtAmt(c.newAmount)} €</span>
+                    <span className="font-mono text-orange-300 font-medium"><Money value={c.newAmount} /></span>
                   </div>
                 )}
                 {c.newStanje != null && (
                   <div className="flex items-center gap-1">
                     <span className="text-slate-500 w-14 shrink-0">Stanje:</span>
-                    <span className="font-mono text-slate-400">{fmtAmt(c.newStanje)} €</span>
+                    <span className="font-mono text-slate-400"><Money value={c.newStanje} /></span>
                   </div>
                 )}
               </div>
@@ -1157,9 +1158,6 @@ interface RuleTxn {
 function fmtDate(iso: string) {
   return new Intl.DateTimeFormat("sl-SI", { day: "2-digit", month: "2-digit", year: "numeric" }).format(new Date(iso));
 }
-function fmtAmt(v: number) {
-  return new Intl.NumberFormat("sl-SI", { style: "currency", currency: "EUR" }).format(v);
-}
 
 function RuleTransactions({ conditions, categoryId }: { conditions: RuleCondition[]; categoryId: number }) {
   const [txns, setTxns] = useState<RuleTxn[] | null>(null);
@@ -1243,8 +1241,8 @@ function RuleTransactions({ conditions, categoryId }: { conditions: RuleConditio
               <td className="px-3 py-1.5 text-slate-400 max-w-[260px]">
                 <span className="block truncate">{t.description}</span>
               </td>
-              <td className={`px-3 py-1.5 tabular-nums text-right whitespace-nowrap font-medium ${t.type === "income" ? "text-emerald-400" : "text-rose-400"}`}>
-                {t.type === "expense" ? "−" : "+"}{fmtAmt(t.amount)}
+                <td className={`px-3 py-1.5 tabular-nums text-right whitespace-nowrap font-medium ${t.type === "income" ? "text-emerald-400" : "text-rose-400"}`}>
+                  <Money value={t.amount} sign={t.type === "expense" ? "−" : "+"} />
               </td>
             </tr>
           ))}
