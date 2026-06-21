@@ -49,27 +49,43 @@ function countGroupTransactions(descriptions: string[], type: "income" | "expens
 }
 
 /**
+ * Strip redundant type suffixes that the AI occasionally appends to category
+ * names, e.g. "Osebna nega (odhodek)" → "Osebna nega".
+ * We always store the type separately, so the suffix is pure noise.
+ */
+function stripTypeSuffix(name: string): string {
+  return name
+    .replace(/\s*[\(\[](odhodek|prihodek|expense|income|both|oboje)[\)\]]\s*$/i, "")
+    .trim();
+}
+
+/**
  * Group per-description proposals into distinct suggested categories.
  *
- * `count` is the real number of transactions each group would capture. Groups that
- * would hold only one or two transactions are dropped entirely — those rows stay
- * in the "Ostali …" fallback instead of spawning a barely-used category. This runs
- * once at the end of the job, so the counts are final (a description that looked
- * lonely early on may have many siblings by the time we get here).
+ * Key insight: group by *normalized name only* (not name+type). If the same
+ * name appears for both income and expense proposals, merge them into a
+ * "both" group — the user can still change the type in the modal.
+ *
+ * `count` is the real number of transactions each group would capture. Groups
+ * that would hold fewer than MIN_TRANSACTIONS are dropped — those rows stay
+ * in the "Ostali …" fallback instead of spawning a barely-used category.
+ * This runs once at the end of the job so counts are final.
  */
 export function buildProposalGroups(results: SmartCatResult[]): ReviewProposalGroup[] {
-  const MIN_TRANSACTIONS = 3; // drop groups with 1–2 transactions
+  const MIN_TRANSACTIONS = 3;
+  // Key is normalize(cleanedName) only — no type component.
   const groups = new Map<string, ReviewProposalGroup>();
   let colorIdx = 0;
 
   for (const r of results) {
     if (!r.proposal) continue;
-    const key = `${normalize(r.proposal.name)}|${r.proposal.type}`;
+    const cleanName = stripTypeSuffix(r.proposal.name);
+    const key = normalize(cleanName);
     let g = groups.get(key);
     if (!g) {
       g = {
         key,
-        name: r.proposal.name,
+        name: cleanName,
         type: r.proposal.type,
         color: SUGGESTION_COLORS[colorIdx++ % SUGGESTION_COLORS.length],
         reason: r.proposal.reason,
@@ -78,6 +94,9 @@ export function buildProposalGroups(results: SmartCatResult[]): ReviewProposalGr
         descriptions: [],
       };
       groups.set(key, g);
+    } else if (g.type !== r.proposal.type) {
+      // Same name, different type → widen to "both".
+      g.type = "both";
     }
     g.descriptions.push(r.description);
     if (g.samples.length < 5) g.samples.push(r.description);
@@ -86,7 +105,7 @@ export function buildProposalGroups(results: SmartCatResult[]): ReviewProposalGr
   const out: ReviewProposalGroup[] = [];
   for (const g of groups.values()) {
     g.count = countGroupTransactions(g.descriptions, g.type);
-    if (g.count < MIN_TRANSACTIONS) continue; // too small → leave in "Ostali …"
+    if (g.count < MIN_TRANSACTIONS) continue;
     out.push(g);
   }
   return out;

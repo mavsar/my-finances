@@ -155,6 +155,7 @@ Pravila za NOVE kategorije (ZELO POMEMBNO — izogibaj se novim kategorijam):
 - Če bi nova kategorija vsebovala le enega trgovca ali en sam primer, je NE predlagaj — izberi najbližjo obstoječo kategorijo.
 - Predlagaj čim MANJ različnih novih kategorij. Pri dvomu vedno raje uporabi obstoječo.
 - Če je v seznamu "Že predlagane NOVE kategorije" že kaj primernega, OBVEZNO uporabi povsem enako ime (npr. ne "Davki & plačila", če že obstaja "Davki in dajatve").
+- NIKOLI ne dodajaj tipa v ime kategorije — torej NIKOLI "(odhodek)", "(prihodek)", "(expense)", "(income)" ipd. Tip je ločeno polje.
 
 Ostala pravila:
 - NE uporabljaj "Ostali odhodki" / "Ostali prihodki", razen če transakcije res NI mogoče prepoznati (npr. anonimni prenos brez prejemnika).
@@ -209,7 +210,9 @@ async function categorizeBatch(
     const nc = rec?.new_category;
     if (categoryId === null && nc && typeof nc === "object") {
       const ncr = nc as Record<string, unknown>;
-      const name = typeof ncr.name === "string" ? ncr.name.trim() : "";
+      // Strip type suffixes the AI sometimes appends, e.g. "Osebna nega (odhodek)".
+      const rawName = typeof ncr.name === "string" ? ncr.name.trim() : "";
+      const name = rawName.replace(/\s*[\(\[](odhodek|prihodek|expense|income|both|oboje)[\)\]]\s*$/i, "").trim();
       const rawType = ncr.type;
       const type: NewCategoryProposal["type"] =
         rawType === "income" || rawType === "both" ? rawType : "expense";
